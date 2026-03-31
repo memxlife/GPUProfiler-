@@ -112,7 +112,9 @@ def test_autonomous_run_produces_model_artifacts(tmp_path):
     assert (run_dir / "iterations" / "iter_00" / "implementation.json").exists()
     assert (run_dir / "iterations" / "iter_00" / "feasibility_report.json").exists()
     assert (run_dir / "iterations" / "iter_00" / "execution_results.json").exists()
+    assert (run_dir / "iterations" / "iter_00" / "execution.md").exists()
     assert (run_dir / "iterations" / "iter_00" / "analysis_update.json").exists()
+    assert (run_dir / "iterations" / "iter_00" / "analysis.md").exists()
 
     run_log = json.loads((run_dir / "run_log.json").read_text(encoding="utf-8"))
     kinds = [item["kind"] for item in run_log]

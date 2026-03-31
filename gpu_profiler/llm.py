@@ -336,7 +336,7 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
             stop=stop,
             reason="Coverage or iteration limit reached." if stop else "Continue iterations.",
             veto_next_plan=veto_next_plan,
-            veto_reason="All suite benchmarks failed or were skipped." if veto_next_plan else "",
+            veto_reason="All implementation runs failed or were skipped." if veto_next_plan else "",
             required_observability=[],
             contract_amendments=[],
             planner=self.name,

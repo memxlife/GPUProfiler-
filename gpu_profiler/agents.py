@@ -511,9 +511,12 @@ class BenchmarkExecutorAgent(Agent):
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
         iter_dir.mkdir(parents=True, exist_ok=True)
         out = iter_dir / "execution_results.json"
+        md_out = iter_dir / "execution.md"
         payload = {"iteration": iteration, "benchmarks_run": len(results), "results": results}
         write_json(out, payload)
+        write_text(md_out, _render_execution_md(payload))
         payload["artifact"] = str(out)
+        payload["artifact_md"] = str(md_out)
         return payload
 
 
@@ -580,6 +583,7 @@ class LLMAnalysisAgent(Agent):
 
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
         analysis_path = iter_dir / "analysis_update.json"
+        analysis_md_path = iter_dir / "analysis.md"
         out = {
             "iteration": iteration,
             "summary": decision.summary,
@@ -596,7 +600,9 @@ class LLMAnalysisAgent(Agent):
             "kb_artifact": str(kb_path),
         }
         write_json(analysis_path, out)
+        write_text(analysis_md_path, _render_analysis_md(out))
         out["artifact"] = str(analysis_path)
+        out["artifact_md"] = str(analysis_md_path)
         return out
 
 
@@ -1011,6 +1017,60 @@ def _render_implementation_md(implementation: dict[str, Any]) -> str:
         lines.extend(["## Generated Files"])
         for path in implementation.get("generated_files", []):
             lines.append(f"- `{path}`")
+    return "\n".join(lines)
+
+
+def _render_execution_md(execution: dict[str, Any]) -> str:
+    lines = [
+        f"# Iteration {execution.get('iteration')} Execution",
+        "",
+        f"- benchmarks_run: `{execution.get('benchmarks_run', 0)}`",
+        "",
+        "## Results",
+    ]
+    for result in execution.get("results", []):
+        workload = result.get("workload", {}) if isinstance(result.get("workload", {}), dict) else {}
+        lines.extend(
+            [
+                f"- benchmark_id: `{result.get('benchmark_id')}`",
+                f"- dimensions: `{result.get('dimensions', [])}`",
+                f"- returncode: `{workload.get('returncode')}`",
+                f"- skipped: `{workload.get('skipped', False)}`",
+                f"- elapsed_sec: `{workload.get('elapsed_sec')}`",
+                f"- raw_artifacts: `{result.get('raw_artifacts', [])}`",
+                "",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _render_analysis_md(analysis: dict[str, Any]) -> str:
+    lines = [
+        f"# Iteration {analysis.get('iteration')} Analysis",
+        "",
+        f"- planner: `{analysis.get('planner')}`",
+        f"- summary: {analysis.get('summary')}",
+        f"- claims_added: `{analysis.get('claims_added', 0)}`",
+        f"- covered_dimensions: `{analysis.get('covered_dimensions', [])}`",
+        f"- coverage_score: `{analysis.get('coverage_score', 0.0)}`",
+        f"- stop: `{analysis.get('stop', False)}`",
+        f"- reason: {analysis.get('reason')}",
+    ]
+    veto_reason = str(analysis.get("veto_reason", "")).strip()
+    if veto_reason:
+        lines.append(f"- veto_reason: {veto_reason}")
+    required_observability = analysis.get("required_observability", [])
+    if required_observability:
+        lines.extend(["", "## Required Observability"])
+        for item in required_observability:
+            lines.append(f"- {item}")
+    amendments = analysis.get("contract_amendments", [])
+    if amendments:
+        lines.extend(["", "## Contract Amendments"])
+        for item in amendments:
+            lines.append(
+                f"- path: `{item.get('path')}` | change: {item.get('change')} | priority: `{item.get('priority')}`"
+            )
     return "\n".join(lines)
 
 

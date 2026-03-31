@@ -45,9 +45,12 @@ Autonomous artifacts include:
 - `autonomous_report.md`
 - `iterations/iter_XX/knowledge_model.json` (planner-owned knowledge hierarchy)
 - `iterations/iter_XX/proposal.json` and `proposal.md` (planner-owned non-executable proposal)
+- `iterations/iter_XX/research_request.json` plus `research.json` and `research.md` (planner-directed search handoff and results)
 - `iterations/iter_XX/implementation.json` and `implementation.md` (LLM code generator output)
+- `iterations/iter_XX/feasibility_report.json` (codegen feasibility and complexity assessment)
+- `iterations/iter_XX/execution_results.json` and `execution.md` (runner evidence-preserving execution record)
 - `iterations/iter_XX/bench_YY_*/benchmark_result.json` (benchmark executor results)
-- `iterations/iter_XX/analysis_update.json` (LLM analyzer + KB update)
+- `iterations/iter_XX/analysis_update.json` and `analysis.md` (LLM analyzer + KB update)
 
 Planner backend options:
 - `--planner-backend heuristic` (default deterministic planner)
@@ -62,11 +65,13 @@ Default autonomous modeling dimensions are fine-grained and include compute and 
 
 Autonomous loop structure:
 1. LLM schema-contract agent negotiates shared JSON structure for planner/codegen/analysis outputs.
-2. LLM planner produces a knowledge model plus a non-executable proposal from intent + knowledge base.
-3. LLM code generator creates concrete benchmark implementation artifacts from the planner proposal.
-4. Benchmark executor runs the generated implementation and collects artifacts.
-5. LLM analysis agent extracts claims, updates knowledge base, and decides whether to continue.
-6. Repeat until planner/analysis stops or max iteration count is reached.
+2. LLM planner produces a knowledge model, a non-executable proposal, and an optional research request from intent + knowledge base.
+3. LLM search agent executes the planner-issued research request and returns sourced research artifacts.
+4. LLM planner refines the proposal using the research results when search was requested.
+5. LLM code generator creates concrete benchmark implementation artifacts from the planner proposal.
+6. Benchmark executor runs the generated implementation and collects artifacts.
+7. LLM analysis agent extracts claims, updates knowledge base, and decides whether to continue.
+8. Repeat until planner/analysis stops or max iteration count is reached.
 
 The autonomous knowledge base records local tool availability (`ncu`, `nsys`, etc.) and the LLM code generator prefers those tools when present.
 
