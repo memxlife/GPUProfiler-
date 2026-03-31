@@ -135,7 +135,7 @@ These artifacts define the search-agent boundary.
 
 ## 10. `research_request.json` MVP
 
-This artifact is planner-authored and is the primary input to the research agent.
+This artifact is planner-authored and is the primary input to the search agent.
 
 Suggested MVP structure:
 

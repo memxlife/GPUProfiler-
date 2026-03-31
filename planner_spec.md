@@ -291,7 +291,7 @@ This proposal must remain non-executable.
 
 ## 14. `research_request.json` MVP
 
-The MVP `research_request.json` must be planner-authored and should describe the external knowledge needed from the research agent.
+The MVP `research_request.json` must be planner-authored and should describe the external knowledge needed from the search agent.
 
 Suggested MVP structure:
 
