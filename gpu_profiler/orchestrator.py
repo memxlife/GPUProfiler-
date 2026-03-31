@@ -178,6 +178,7 @@ class Orchestrator:
                         "iteration": iteration,
                         "knowledge_base": knowledge_base,
                         "research_request_artifact": research_request_artifact,
+                        "research_request_meta_artifact": research_plan.get("research_request_meta_artifact"),
                         "max_sources": 10,
                     },
                 )
@@ -200,6 +201,11 @@ class Orchestrator:
                     "max_benchmarks": max_benchmarks,
                     "knowledge_base": knowledge_base,
                     "knowledge_model_artifact": knowledge_base.get("knowledge_model_artifact"),
+                    "research_artifact_md": (
+                        knowledge_base.get("latest_research", {})
+                        if isinstance(knowledge_base.get("latest_research", {}), dict)
+                        else {}
+                    ).get("artifact_md"),
                 },
             )
             completed.append(self._run_with_retry(proposal_task, ctx))
@@ -393,6 +399,7 @@ class Orchestrator:
                 "findings": findings if isinstance(findings, list) else [],
                 "proposed_dimensions": research.get("proposed_dimensions", []),
                 "artifact": research.get("artifact"),
+                "artifact_md": research.get("artifact_md"),
                 "timestamp": time.time(),
             }
         )
@@ -409,6 +416,7 @@ class Orchestrator:
         kb["latest_research"] = {
             "iteration": iteration,
             "artifact": research.get("artifact"),
+            "artifact_md": research.get("artifact_md"),
             "findings_count": len(findings) if isinstance(findings, list) else 0,
         }
         write_json(kb_path, kb)
@@ -422,6 +430,7 @@ class Orchestrator:
                 "planner": result.get("planner"),
                 "reason": result.get("reason"),
                 "research_request_artifact": result.get("research_request_artifact"),
+                "research_request_meta_artifact": result.get("research_request_meta_artifact"),
                 "proposal": None,
                 "timestamp": time.time(),
             }

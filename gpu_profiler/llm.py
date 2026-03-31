@@ -93,6 +93,7 @@ class LLMWorkflowBackend:
         kb: dict[str, Any],
         iteration: int,
         research_request: dict[str, Any] | None = None,
+        research_request_memo: str = "",
         max_sources: int = 8,
     ) -> ResearchDecision:
         raise NotImplementedError
@@ -124,6 +125,7 @@ class LLMWorkflowBackend:
         iteration: int,
         max_iterations: int,
         max_benchmarks: int,
+        research_memo: str = "",
     ) -> ProposalPlanDecision:
         raise NotImplementedError
 
@@ -134,6 +136,7 @@ class LLMWorkflowBackend:
         plan: dict[str, Any],
         iteration: int,
         max_benchmarks: int,
+        proposal_memo: str = "",
     ) -> ImplementationDecision:
         raise NotImplementedError
 
@@ -231,9 +234,10 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
         kb: dict[str, Any],
         iteration: int,
         research_request: dict[str, Any] | None = None,
+        research_request_memo: str = "",
         max_sources: int = 8,
     ) -> ResearchDecision:
-        _ = (intent, kb, iteration, max_sources)
+        _ = (intent, kb, iteration, max_sources, research_request_memo)
         return ResearchDecision(
             reason="Heuristic backend does not perform online research.",
             request_summary=str((research_request or {}).get("request_summary", "")).strip(),
@@ -292,8 +296,9 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
         iteration: int,
         max_iterations: int,
         max_benchmarks: int,
+        research_memo: str = "",
     ) -> ProposalPlanDecision:
-        _ = max_iterations
+        _ = (max_iterations, research_memo)
         focus = _planner_focus_dimensions_from_kb(kb=kb, iteration=iteration, max_benchmarks=max_benchmarks)
         return ProposalPlanDecision(
             reason="Fallback planner produced generic plan items.",
@@ -308,8 +313,9 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
         plan: dict[str, Any],
         iteration: int,
         max_benchmarks: int,
+        proposal_memo: str = "",
     ) -> ImplementationDecision:
-        _ = (intent, kb)
+        _ = (intent, kb, proposal_memo)
         focus = _proposal_focus_nodes(plan.get("proposal", {}))[: max(1, max_benchmarks)]
         benchmarks = []
         for idx, dim in enumerate(focus or [f"dimension_{iteration + 1}"]):
@@ -480,14 +486,17 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         kb: dict[str, Any],
         iteration: int,
         research_request: dict[str, Any] | None = None,
+        research_request_memo: str = "",
         max_sources: int = 8,
     ) -> ResearchDecision:
         request = research_request or {}
+        compact_kb = _compact_search_kb(kb)
         payload = {
             "intent": intent,
-            "knowledge_base": kb,
+            "knowledge_base": compact_kb,
             "iteration": iteration,
-            "research_request": request,
+            "research_request": _compact_research_request(request),
+            "research_request_memo": _trim_text(research_request_memo, 3000),
             "max_sources": max_sources,
             "task": (
                 "Search online only within the scope requested by the planner-authored research request. "
@@ -628,6 +637,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         iteration: int,
         max_iterations: int,
         max_benchmarks: int,
+        research_memo: str = "",
     ) -> ProposalPlanDecision:
         compact_kb = _compact_planner_kb(
             kb=kb,
@@ -641,6 +651,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             "iteration": iteration,
             "max_iterations": max_iterations,
             "max_benchmarks": max_benchmarks,
+            "research_memo": _trim_text(research_memo, 3000),
             "output_schema": {
                 "reason": "str",
                 "proposal": {
@@ -700,6 +711,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         plan: dict[str, Any],
         iteration: int,
         max_benchmarks: int,
+        proposal_memo: str = "",
     ) -> ImplementationDecision:
         focus = _proposal_focus_nodes(plan.get("proposal", {}))
         if not focus:
@@ -717,6 +729,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                 "plan": compact_plan,
                 "iteration": iteration,
                 "dimension": dim,
+                "proposal_memo": _trim_text(proposal_memo, 3000),
                 "output_schema": {
                     "reason": "str",
                     "benchmark": {
@@ -996,11 +1009,12 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
         iteration: int,
         max_iterations: int,
         max_benchmarks: int,
+        research_memo: str = "",
     ) -> ProposalPlanDecision:
         try:
-            return self._call_primary("plan_proposal", intent, kb, iteration, max_iterations, max_benchmarks)
+            return self._call_primary("plan_proposal", intent, kb, iteration, max_iterations, max_benchmarks, research_memo)
         except Exception as exc:  # noqa: BLE001
-            alt = self.fallback.plan_proposal(intent, kb, iteration, max_iterations, max_benchmarks)
+            alt = self.fallback.plan_proposal(intent, kb, iteration, max_iterations, max_benchmarks, research_memo)
             alt.reason = f"Primary proposal planning failed ({exc}); fallback used. {alt.reason}"
             alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
             return alt
@@ -1011,12 +1025,15 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
         kb: dict[str, Any],
         iteration: int,
         research_request: dict[str, Any] | None = None,
+        research_request_memo: str = "",
         max_sources: int = 8,
     ) -> ResearchDecision:
         try:
-            return self._call_primary("research_context", intent, kb, iteration, research_request, max_sources)
+            return self._call_primary(
+                "research_context", intent, kb, iteration, research_request, research_request_memo, max_sources
+            )
         except Exception as exc:  # noqa: BLE001
-            alt = self.fallback.research_context(intent, kb, iteration, research_request, max_sources)
+            alt = self.fallback.research_context(intent, kb, iteration, research_request, research_request_memo, max_sources)
             alt.reason = f"Primary research failed ({exc}); fallback used. {alt.reason}"
             alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
             return alt
@@ -1028,11 +1045,12 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
         plan: dict[str, Any],
         iteration: int,
         max_benchmarks: int,
+        proposal_memo: str = "",
     ) -> ImplementationDecision:
         try:
-            return self._call_primary("generate_implementation", intent, kb, plan, iteration, max_benchmarks)
+            return self._call_primary("generate_implementation", intent, kb, plan, iteration, max_benchmarks, proposal_memo)
         except Exception as exc:  # noqa: BLE001
-            alt = self.fallback.generate_implementation(intent, kb, plan, iteration, max_benchmarks)
+            alt = self.fallback.generate_implementation(intent, kb, plan, iteration, max_benchmarks, proposal_memo)
             alt.reason = f"Primary implementation generation failed ({exc}); fallback used. {alt.reason}"
             alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
             return alt
@@ -1264,6 +1282,44 @@ def _compact_planner_kb(
         "history": compact_history,
         "research_history": compact_research,
         "pending_contract_amendments": compact_amendments,
+    }
+
+
+def _compact_search_kb(kb: dict[str, Any]) -> dict[str, Any]:
+    tools = {
+        str(name): bool(enabled)
+        for name, enabled in (kb.get("available_tools", {}) if isinstance(kb.get("available_tools", {}), dict) else {}).items()
+        if enabled
+    }
+    return {
+        "intent": _trim_text(kb.get("intent", ""), 160),
+        "available_tools": tools,
+        "target_dimensions": _sanitize_dimensions(kb.get("target_dimensions", []), [], 8),
+        "current_knowledge_model": {
+            "focus_nodes": [
+                str(x).strip()
+                for x in (
+                    kb.get("current_knowledge_model", {})
+                    if isinstance(kb.get("current_knowledge_model", {}), dict)
+                    else {}
+                ).get("focus_nodes", [])
+                if str(x).strip()
+            ][:6]
+        },
+    }
+
+
+def _compact_research_request(request: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(request, dict):
+        return {}
+    return {
+        "intent_summary": _trim_text(request.get("intent_summary", ""), 160),
+        "request_summary": _trim_text(request.get("request_summary", ""), 220),
+        "target_nodes": [str(x).strip() for x in request.get("target_nodes", []) if str(x).strip()][:8],
+        "target_questions": [str(x).strip() for x in request.get("target_questions", []) if str(x).strip()][:6],
+        "search_topics": [str(x).strip() for x in request.get("search_topics", []) if str(x).strip()][:8],
+        "source_preferences": [str(x).strip() for x in request.get("source_preferences", []) if str(x).strip()][:6],
+        "expected_outputs": [str(x).strip() for x in request.get("expected_outputs", []) if str(x).strip()][:6],
     }
 
 

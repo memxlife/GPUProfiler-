@@ -89,20 +89,26 @@ class LLMPlanningAgent(Agent):
                 "research_request": decision.research_request,
             }
             research_request_path = iter_dir / "research_request.json"
+            research_request_md_path = iter_dir / "research_request.md"
             if isinstance(decision.research_request, dict):
                 write_json(research_request_path, decision.research_request)
-                result["research_request_artifact"] = str(research_request_path)
+                write_text(research_request_md_path, _render_research_request_md(result))
+                result["research_request_artifact"] = str(research_request_md_path)
+                result["research_request_meta_artifact"] = str(research_request_path)
             else:
                 result["research_request_artifact"] = None
+                result["research_request_meta_artifact"] = None
             return result
 
         if task.kind == "llm_plan_proposal":
+            research_memo = _read_text_artifact(task.payload.get("research_artifact_md"))
             decision = self.workflow_backend.plan_proposal(
                 intent=intent,
                 kb=kb,
                 iteration=iteration,
                 max_iterations=max_iterations,
                 max_benchmarks=max_benchmarks,
+                research_memo=research_memo,
             )
             plan = {
                 "iteration": iteration,
@@ -207,7 +213,10 @@ class LLMResearchAgent(Agent):
         request_path = task.payload.get("research_request_artifact")
         if not request_path:
             raise ValueError("llm_research requires research_request_artifact")
-        research_request = read_json(Path(request_path), {})
+        request_memo = _read_text_artifact(request_path)
+        request_meta_path = task.payload.get("research_request_meta_artifact")
+        meta_path = Path(request_meta_path) if request_meta_path else Path(request_path)
+        research_request = read_json(meta_path, {})
         if not isinstance(research_request, dict) or not research_request:
             raise ValueError("research_request_artifact did not contain a valid request object")
         intent = str(research_request.get("intent_summary", task.payload.get("intent", ""))).strip()
@@ -217,6 +226,7 @@ class LLMResearchAgent(Agent):
             kb=kb,
             iteration=iteration,
             research_request=research_request,
+            research_request_memo=request_memo,
             max_sources=max_sources,
         )
         result = {
@@ -229,6 +239,7 @@ class LLMResearchAgent(Agent):
             "findings": decision.findings,
             "proposed_dimensions": decision.proposed_dimensions,
             "research_request_artifact": str(request_path),
+            "research_request_meta_artifact": str(meta_path),
         }
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
         iter_dir.mkdir(parents=True, exist_ok=True)
@@ -265,6 +276,7 @@ class LLMCodegenAgent(Agent):
             plan=plan,
             iteration=iteration,
             max_benchmarks=max_benchmarks,
+            proposal_memo=_read_text_artifact(plan.get("proposal_md_artifact")),
         )
         accepted, rejected, policy = _apply_negotiation_policy(
             benchmarks=decision.benchmarks,
@@ -1017,6 +1029,33 @@ def _render_proposal_md(plan: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_research_request_md(result: dict[str, Any]) -> str:
+    request = result.get("research_request", {}) if isinstance(result.get("research_request", {}), dict) else {}
+    lines = [
+        f"# Iteration {result.get('iteration')} Research Request",
+        "",
+        f"- planner: `{result.get('planner')}`",
+        f"- reason: {result.get('reason')}",
+        "",
+        "## Objective",
+        request.get("request_summary", ""),
+        "",
+        "## Target Nodes",
+    ]
+    for item in request.get("target_nodes", []):
+        lines.append(f"- {item}")
+    lines.extend(["", "## Questions"])
+    for item in request.get("target_questions", []):
+        lines.append(f"- {item}")
+    lines.extend(["", "## Search Topics"])
+    for item in request.get("search_topics", []):
+        lines.append(f"- {item}")
+    lines.extend(["", "## Expected Outputs"])
+    for item in request.get("expected_outputs", []):
+        lines.append(f"- {item}")
+    return "\n".join(lines)
+
+
 def _empty_knowledge_model(intent: str) -> dict[str, Any]:
     return {
         "intent": {"summary": intent},
@@ -1142,6 +1181,16 @@ def _render_research_md(research: dict[str, Any]) -> str:
             ]
         )
     return "\n".join(lines)
+
+
+def _read_text_artifact(path_value: Any) -> str:
+    path = str(path_value or "").strip()
+    if not path:
+        return ""
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except Exception:
+        return ""
 
 
 def _render_implementation_md(implementation: dict[str, Any]) -> str:
