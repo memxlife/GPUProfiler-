@@ -59,6 +59,25 @@ Each agent should use an error object of the form:
 
 Artifact paths should point to persisted files. Agents should prefer artifact handoff over large in-memory opaque structures.
 
+### 2.4 LLM Budget Rule
+
+For any LLM-backed agent call, the flow controller or agent adapter should construct the smallest context slice sufficient for the decision.
+
+General rules:
+
+- prefer artifact references over embedding large artifact contents inline
+- prefer compact summaries over full history
+- include only the immediately relevant upstream state
+- enforce both input-size and response-size budgets before issuing the LLM call
+- if the input exceeds the hard cap, summarize or trim before calling the model
+
+Budget terminology:
+
+- input target: preferred serialized request size
+- input hard cap: maximum serialized request size before trimming is required
+- response target: preferred output size for the model response
+- timeout target: expected wall-clock budget for the call
+
 ## 3. Planner API
 
 ### 3.1 Agent Name
@@ -150,6 +169,29 @@ Optional:
 - `research_request.json` only when search is needed
 - planner output content is domain-specific, but schema is generic
 
+### 3.8 Budget
+
+- input target: `<= 6 KB`
+- input hard cap: `<= 10 KB`
+- response target: `<= 2 KB`
+- timeout target: `10-15s`
+
+Preferred planner input slice:
+
+- intent summary
+- iteration index
+- top relevant knowledge nodes only
+- latest research summary only
+- latest analyzer gap summary only
+- compact planning constraints
+
+Avoid sending:
+
+- full knowledge base by default
+- full run history
+- full run log
+- redundant copies of prior artifacts
+
 ## 4. Search API
 
 ### 4.1 Agent Name
@@ -225,6 +267,24 @@ Required:
 - must preserve provenance for findings
 - must not generate proposals or code
 - must produce `research.json` on success
+
+### 4.8 Budget
+
+- input target: `<= 3 KB`
+- input hard cap: `<= 5 KB`
+- response target: `<= 4 KB`
+- timeout target: `10-20s`
+
+Preferred search input slice:
+
+- `research_request.json`
+- compact system context only if required for the requested search
+
+Avoid sending:
+
+- full knowledge model unless directly needed
+- full proposal history
+- full knowledge base
 
 ## 5. Codegen API
 
@@ -313,6 +373,26 @@ Optional:
 - feasibility judgment must include implementation complexity
 - validation is implementation validation only, not scientific benchmarking
 - must produce `feasibility_report.json` on success or partial success
+
+### 5.8 Budget
+
+- input target: `<= 8 KB`
+- input hard cap: `<= 12 KB`
+- response target per benchmark: `<= 3 KB`
+- timeout target: `10-15s`
+
+Preferred codegen input slice:
+
+- one proposal item at a time
+- minimal relevant knowledge-node context
+- tool availability summary
+- implementation constraints
+
+Avoid sending:
+
+- the entire proposal set when generating one benchmark
+- full research dump
+- full knowledge base or history
 
 ## 6. Runner API
 
@@ -403,6 +483,17 @@ Optional or preserved:
 - must not reinterpret raw evidence
 - must produce `execution_results.json` on success or partial success
 
+### 6.8 Budget
+
+Runner is not primarily LLM-backed. Execution metadata should remain compact even when preserved raw artifacts are large on disk.
+
+- execution summary target: `<= 4 KB`
+- raw profiler outputs, logs, and traces should remain on disk and be referenced by path
+
+Avoid:
+
+- embedding large stdout, trace, or profiler outputs inline in downstream LLM prompts
+
 ## 7. Analyzer API
 
 ### 7.1 Agent Name
@@ -490,6 +581,26 @@ Optional:
 - must distinguish supported vs unresolved vs contradictory knowledge
 - must produce planner-facing feedback in `analysis_update.json`
 
+### 7.8 Budget
+
+- input target: `<= 8 KB`
+- input hard cap: `<= 12 KB`
+- response target: `<= 3 KB`
+- timeout target: `10-15s`
+
+Preferred analyzer input slice:
+
+- execution summary, not full raw logs inline
+- artifact references
+- relevant proposal item or proposal summary
+- relevant knowledge nodes only
+
+Avoid sending:
+
+- large raw profiler outputs inline
+- redundant copies of execution artifacts
+- full run history by default
+
 ## 8. Flow Controller API
 
 ### 8.1 Agent Name
@@ -575,3 +686,14 @@ Optional:
 - must enforce iteration and retry bounds
 - must invoke agents according to artifact dependencies
 - must make stopping decisions only from explicit policies and agent outputs
+
+### 8.8 Budget
+
+The flow controller should not forward large opaque state blobs to LLM-backed agents.
+
+Rules:
+
+- build compact per-agent context views
+- enforce agent-specific input budgets before dispatch
+- keep run-level history in artifacts on disk rather than repeating it inline
+- pass summaries and references, not full prior payloads, unless an agent explicitly requires them
