@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-from gpu_profiler.agents import Agent
+from gpu_profiler.agents import Agent, WorkloadRunnerAgent
 from gpu_profiler.models import AgentContext, RetryPolicy, Task
 from gpu_profiler.orchestrator import Orchestrator
 
@@ -74,6 +74,95 @@ def test_workload_result_recorded(tmp_path):
     workload = json.loads((run_dir / "workload_result.json").read_text(encoding="utf-8"))
     assert workload["returncode"] == 0
     assert "123" in workload["stdout"]
+
+
+def test_autonomous_run_produces_model_artifacts(tmp_path):
+    copy_app(tmp_path)
+
+    result = run_cli(
+        tmp_path,
+        "autonomous",
+        "--intent",
+        "Develop a performance model for the local GPU",
+        "--out",
+        "runs",
+        "--samples",
+        "1",
+        "--interval",
+        "0",
+        "--max-iterations",
+        "1",
+        "--max-benchmarks",
+        "1",
+        "--target-coverage",
+        "1.0",
+    )
+
+    run_dir = tmp_path / result["run_dir"]
+    assert run_dir.exists()
+    assert result["mode"] == "autonomous"
+
+    assert (run_dir / "performance_model.json").exists()
+    assert (run_dir / "autonomous_report.md").exists()
+    assert (run_dir / "iterations" / "iter_00" / "research.json").exists()
+    assert (run_dir / "iterations" / "iter_00" / "plan.json").exists()
+    assert (run_dir / "iterations" / "iter_00" / "suite.json").exists()
+    assert (run_dir / "iterations" / "iter_00" / "analysis_update.json").exists()
+
+    run_log = json.loads((run_dir / "run_log.json").read_text(encoding="utf-8"))
+    kinds = [item["kind"] for item in run_log]
+    assert kinds[0] == "collect_system_info"
+    assert "llm_research" in kinds
+    assert "llm_plan" in kinds
+    assert "llm_generate_suite" in kinds
+    assert "execute_suite" in kinds
+    assert "llm_analyze_update" in kinds
+    assert kinds[-1] == "autonomous_report"
+
+
+def test_autonomous_openai_backend_falls_back_to_heuristic(tmp_path):
+    copy_app(tmp_path)
+
+    result = run_cli(
+        tmp_path,
+        "autonomous",
+        "--intent",
+        "Develop a performance model for the local GPU",
+        "--planner-backend",
+        "openai",
+        "--out",
+        "runs",
+        "--samples",
+        "1",
+        "--interval",
+        "0",
+        "--max-iterations",
+        "1",
+        "--max-benchmarks",
+        "1",
+        "--target-coverage",
+        "1.0",
+    )
+
+    run_dir = tmp_path / result["run_dir"]
+    run_log = json.loads((run_dir / "run_log.json").read_text(encoding="utf-8"))
+    plan_task = next(item for item in run_log if item["kind"] == "llm_plan")
+    assert plan_task["status"] == "done"
+    assert "fallback" in plan_task["result"]["planner"]
+    assert "fallback used" in plan_task["result"]["reason"]
+
+
+def test_workload_skip_detection(tmp_path):
+    runner = WorkloadRunnerAgent()
+    ctx = AgentContext(run_id="skip-test", run_dir=tmp_path)
+    task = Task(
+        id="skip-0",
+        kind="run_workload",
+        payload={"command": "python -c \"print('SKIP: missing benchmark binary')\""},
+    )
+    result = runner.run(task, ctx)
+    assert result["returncode"] == 0
+    assert result["skipped"] is True
 
 
 class FlakyAgent(Agent):
