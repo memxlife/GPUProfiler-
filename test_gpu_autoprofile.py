@@ -6,7 +6,18 @@ import time
 from pathlib import Path
 
 from gpu_profiler.agents import Agent, WorkloadRunnerAgent
-from gpu_profiler.llm import HeuristicWorkflowBackend, OpenAIWorkflowBackend, ResilientWorkflowBackend
+from gpu_profiler.llm import (
+    CODEGEN_INPUT_HARD_CAP_CHARS,
+    PLANNER_INPUT_HARD_CAP_CHARS,
+    HeuristicWorkflowBackend,
+    OpenAIWorkflowBackend,
+    ResilientWorkflowBackend,
+    _merge_schema_contract,
+    _compact_codegen_kb,
+    _compact_codegen_plan,
+    _compact_planner_kb,
+    _enforce_payload_budget,
+)
 from gpu_profiler.models import AgentContext, RetryPolicy, Task
 from gpu_profiler.orchestrator import Orchestrator
 
@@ -104,6 +115,7 @@ def test_autonomous_run_produces_model_artifacts(tmp_path):
     assert result["mode"] == "autonomous"
 
     assert (run_dir / "performance_model.json").exists()
+    assert (run_dir / "knowledge_model.json").exists()
     assert (run_dir / "autonomous_report.md").exists()
     assert (run_dir / "iterations" / "iter_00" / "research_request.json").exists()
     assert (run_dir / "iterations" / "iter_00" / "research.json").exists()
@@ -121,8 +133,8 @@ def test_autonomous_run_produces_model_artifacts(tmp_path):
     kinds = [item["kind"] for item in run_log]
     assert kinds[0] == "collect_system_info"
     assert "llm_research" in kinds
-    assert "llm_plan" in kinds
-    assert kinds.count("llm_plan") >= 1
+    assert "llm_plan_research" in kinds
+    assert "llm_plan_proposal" in kinds
     assert "llm_generate_implementation" in kinds
     assert "execute_implementation" in kinds
     assert "llm_analyze_update" in kinds
@@ -155,13 +167,21 @@ def test_autonomous_openai_backend_falls_back_to_heuristic(tmp_path):
 
     run_dir = tmp_path / result["run_dir"]
     run_log = json.loads((run_dir / "run_log.json").read_text(encoding="utf-8"))
-    plan_task = next(item for item in run_log if item["kind"] == "llm_plan")
+    plan_task = next(item for item in run_log if item["kind"] == "llm_plan_proposal")
     assert plan_task["status"] == "done"
     assert "fallback" in plan_task["result"]["planner"]
     assert "fallback used" in plan_task["result"]["reason"]
-    assert "knowledge_model" in plan_task["result"]
     assert "proposal" in plan_task["result"]
-    assert "research_request_artifact" in plan_task["result"]
+    research_task = next(item for item in run_log if item["kind"] == "llm_plan_research")
+    assert "research_request_artifact" in research_task["result"]
+
+
+def test_schema_contract_uses_split_planner_outputs():
+    contract = _merge_schema_contract({})
+
+    assert contract["research_request_output"]["required_keys"] == ["reason", "research_request"]
+    assert contract["proposal_output"]["required_keys"] == ["reason", "proposal"]
+    assert "planner_output" not in contract
 
 
 def test_resilient_workflow_falls_back_when_openai_plan_times_out():
@@ -221,6 +241,128 @@ def test_resilient_workflow_terminates_hung_primary_backend():
     assert "fallback used" in result.reason
     assert "timed out" in result.reason
     assert "fallback" in result.planner
+
+
+def test_compact_planner_kb_stays_within_budget():
+    kb = {
+        "intent": "Develop a performance model for the local GPU",
+        "target_dimensions": [f"dim_{i}" for i in range(20)],
+        "covered_dimensions": [f"dim_{i}" for i in range(10)],
+        "coverage_score": 0.3,
+        "target_coverage": 0.9,
+        "available_tools": {"nvidia-smi": True, "ncu": True, "nsys": True, "python": True},
+        "current_knowledge_model": {
+            "focus_nodes": [f"node_{i}" for i in range(12)],
+            "domain_hierarchy": [
+                {
+                    "id": f"node_{i}",
+                    "name": f"Node {i}",
+                    "description": "x" * 400,
+                    "node_type": "feature",
+                    "status": "unknown",
+                    "open_gaps": ["gap one", "gap two", "gap three"],
+                }
+                for i in range(20)
+            ],
+        },
+        "current_proposal": {
+            "target_nodes": [f"node_{i}" for i in range(12)],
+            "proposals": [
+                {
+                    "id": f"proposal_{i}",
+                    "title": "t" * 200,
+                    "objective": "o" * 400,
+                    "target_node_ids": [f"node_{i}"],
+                    "benchmark_role": "baseline",
+                }
+                for i in range(12)
+            ],
+        },
+        "history": [{"iteration": i, "summary": "s" * 500, "coverage_score": 0.1, "claims_added": i} for i in range(6)],
+        "research_history": [
+            {
+                "iteration": i,
+                "request_summary": "r" * 300,
+                "proposed_dimensions": [f"dim_{j}" for j in range(8)],
+                "findings": [{"title": "t" * 120, "summary": "f" * 400, "source_url": "https://example.com"} for _ in range(6)],
+            }
+            for i in range(4)
+        ],
+        "pending_contract_amendments": [{"path": "p" * 80, "change": "c" * 300, "priority": "high"} for _ in range(5)],
+    }
+    compact = _compact_planner_kb(kb)
+    payload = _enforce_payload_budget(
+        {"intent": kb["intent"], "knowledge_base": compact, "iteration": 0, "max_iterations": 1, "max_benchmarks": 1},
+        target_chars=6000,
+        hard_cap_chars=PLANNER_INPUT_HARD_CAP_CHARS,
+        trimmers=[],
+    )
+    assert len(json.dumps(payload)) <= PLANNER_INPUT_HARD_CAP_CHARS
+    assert len(payload["knowledge_base"]["history"]) <= 2
+    assert len(payload["knowledge_base"]["research_history"]) <= 2
+
+
+def test_compact_codegen_payload_stays_within_budget():
+    plan = {
+        "iteration": 0,
+        "planner": "planner",
+        "proposal": {
+            "intent_summary": "Develop a performance model for the local GPU",
+            "proposal_summary": "summary" * 100,
+            "target_nodes": ["feature_0", "feature_1", "feature_2"],
+            "proposals": [
+                {
+                    "id": "proposal_0",
+                    "title": "Baseline for dimension_1",
+                    "objective": "Measure dimension_1 with a simple benchmark",
+                    "target_node_ids": ["feature_0"],
+                    "benchmark_role": "baseline",
+                    "hypothesis": "h" * 300,
+                    "required_evidence": ["e1", "e2", "e3"],
+                    "rationale": "r" * 300,
+                },
+                {
+                    "id": "proposal_1",
+                    "title": "Sweep for dimension_2",
+                    "objective": "Measure dimension_2 with another benchmark",
+                    "target_node_ids": ["feature_1"],
+                    "benchmark_role": "sweep",
+                    "hypothesis": "h" * 300,
+                    "required_evidence": ["e1", "e2", "e3"],
+                    "rationale": "r" * 300,
+                },
+            ],
+        },
+        "knowledge_model": {
+            "focus_nodes": ["feature_0", "feature_1"],
+            "domain_hierarchy": [
+                {"id": "feature_0", "name": "dimension_1", "description": "d" * 400, "status": "unknown", "open_gaps": ["g1"]},
+                {"id": "feature_1", "name": "dimension_2", "description": "d" * 400, "status": "unknown", "open_gaps": ["g2"]},
+            ],
+        },
+    }
+    kb = {
+        "intent": "Develop a performance model for the local GPU",
+        "target_dimensions": ["feature_0", "feature_1"],
+        "available_tools": {"nvidia-smi": True, "ncu": True, "nsys": True, "python": True},
+        "current_knowledge_model": plan["knowledge_model"],
+        "schema_contract": {"negotiation_policy": {"thresholds": {"utility_min": 0.5}, "weights": {"coverage_gain_score": 0.35}}},
+    }
+    payload = {
+        "intent": kb["intent"],
+        "knowledge_base": _compact_codegen_kb(kb, "dimension_1"),
+        "plan": _compact_codegen_plan(plan, "dimension_1"),
+        "iteration": 0,
+        "dimension": "dimension_1",
+    }
+    payload = _enforce_payload_budget(
+        payload,
+        target_chars=8000,
+        hard_cap_chars=CODEGEN_INPUT_HARD_CAP_CHARS,
+        trimmers=[],
+    )
+    assert len(json.dumps(payload)) <= CODEGEN_INPUT_HARD_CAP_CHARS
+    assert len(payload["plan"]["proposal"]["proposals"]) == 1
 
 
 def test_workload_skip_detection(tmp_path):

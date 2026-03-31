@@ -60,17 +60,65 @@ class LLMPlanningAgent(Agent):
         self.workflow_backend = workflow_backend or HeuristicWorkflowBackend()
 
     def can_handle(self, task: Task) -> bool:
-        return task.kind == "llm_plan"
+        return task.kind in {"llm_plan_research", "llm_plan_proposal", "llm_plan"}
 
     def run(self, task: Task, ctx: AgentContext) -> dict[str, Any]:
         intent = str(task.payload.get("intent", "")).strip()
         if not intent:
-            raise ValueError("llm_plan requires intent")
+            raise ValueError(f"{task.kind} requires intent")
 
         iteration = int(task.payload.get("iteration", 0))
         max_iterations = int(task.payload.get("max_iterations", 4))
         max_benchmarks = int(task.payload.get("max_benchmarks", 2))
         kb = task.payload.get("knowledge_base", {})
+        iter_dir = _iteration_dir(ctx.run_dir, iteration)
+        iter_dir.mkdir(parents=True, exist_ok=True)
+        if task.kind == "llm_plan_research":
+            decision = self.workflow_backend.plan_research_request(
+                intent=intent,
+                kb=kb,
+                iteration=iteration,
+                max_iterations=max_iterations,
+                max_benchmarks=max_benchmarks,
+            )
+            result = {
+                "iteration": iteration,
+                "intent": intent,
+                "planner": decision.planner,
+                "reason": decision.reason,
+                "research_request": decision.research_request,
+            }
+            research_request_path = iter_dir / "research_request.json"
+            if isinstance(decision.research_request, dict):
+                write_json(research_request_path, decision.research_request)
+                result["research_request_artifact"] = str(research_request_path)
+            else:
+                result["research_request_artifact"] = None
+            return result
+
+        if task.kind == "llm_plan_proposal":
+            decision = self.workflow_backend.plan_proposal(
+                intent=intent,
+                kb=kb,
+                iteration=iteration,
+                max_iterations=max_iterations,
+                max_benchmarks=max_benchmarks,
+            )
+            plan = {
+                "iteration": iteration,
+                "intent": intent,
+                "planner": decision.planner,
+                "reason": decision.reason,
+                "proposal": decision.proposal,
+                "knowledge_model_artifact": task.payload.get("knowledge_model_artifact"),
+            }
+            proposal_path = iter_dir / "proposal.json"
+            proposal_md_path = iter_dir / "proposal.md"
+            write_json(proposal_path, decision.proposal)
+            write_text(proposal_md_path, _render_proposal_md(plan))
+            plan["proposal_artifact"] = str(proposal_path)
+            plan["proposal_md_artifact"] = str(proposal_md_path)
+            return plan
 
         decision = self.workflow_backend.propose_plan(
             intent=intent,
@@ -79,7 +127,6 @@ class LLMPlanningAgent(Agent):
             max_iterations=max_iterations,
             max_benchmarks=max_benchmarks,
         )
-
         plan = {
             "iteration": iteration,
             "intent": intent,
@@ -89,8 +136,6 @@ class LLMPlanningAgent(Agent):
             "proposal": decision.proposal,
             "research_request": decision.research_request,
         }
-        iter_dir = _iteration_dir(ctx.run_dir, iteration)
-        iter_dir.mkdir(parents=True, exist_ok=True)
         model_path = iter_dir / "knowledge_model.json"
         proposal_path = iter_dir / "proposal.json"
         proposal_md_path = iter_dir / "proposal.md"
@@ -535,6 +580,8 @@ class LLMAnalysisAgent(Agent):
         max_iterations = int(task.payload.get("max_iterations", 4))
         kb_path = Path(task.payload.get("kb_path") or (ctx.run_dir / "performance_model.json"))
         kb = read_json(kb_path, {})
+        knowledge_model_path = Path(task.payload.get("knowledge_model_path") or (ctx.run_dir / "knowledge_model.json"))
+        current_model = read_json(knowledge_model_path, {})
         plan = task.payload.get("plan", {})
         execution_results = task.payload.get("execution_results", [])
 
@@ -558,11 +605,32 @@ class LLMAnalysisAgent(Agent):
 
         kb.setdefault("history", [])
         kb.setdefault("claims", [])
+        kb.setdefault("knowledge_model_history", [])
         kb["covered_dimensions"] = covered
         kb["coverage_score"] = coverage_score
         kb["last_summary"] = decision.summary
         kb["last_planner"] = decision.planner
         kb["claims"].extend(decision.claims)
+        updated_model = _update_knowledge_model(
+            current_model=current_model,
+            intent=intent,
+            plan=plan,
+            covered_dimensions=covered,
+            claims=decision.claims,
+            required_observability=decision.required_observability,
+            iteration=iteration,
+        )
+        kb["current_knowledge_model"] = updated_model
+        kb["knowledge_model_artifact"] = str(knowledge_model_path)
+        kb["knowledge_model_history"].append(
+            {
+                "iteration": iteration,
+                "artifact": str(knowledge_model_path),
+                "focus_nodes": updated_model.get("focus_nodes", []),
+                "node_count": len(updated_model.get("domain_hierarchy", [])),
+                "timestamp": time.time(),
+            }
+        )
         kb["history"].append(
             {
                 "iteration": iteration,
@@ -579,11 +647,14 @@ class LLMAnalysisAgent(Agent):
                 "timestamp": time.time(),
             }
         )
+        write_json(knowledge_model_path, updated_model)
         write_json(kb_path, kb)
 
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
         analysis_path = iter_dir / "analysis_update.json"
         analysis_md_path = iter_dir / "analysis.md"
+        iter_model_path = iter_dir / "knowledge_model.json"
+        write_json(iter_model_path, updated_model)
         out = {
             "iteration": iteration,
             "summary": decision.summary,
@@ -598,6 +669,8 @@ class LLMAnalysisAgent(Agent):
             "contract_amendments": decision.contract_amendments,
             "planner": decision.planner,
             "kb_artifact": str(kb_path),
+            "knowledge_model_artifact": str(knowledge_model_path),
+            "knowledge_model_iteration_artifact": str(iter_model_path),
         }
         write_json(analysis_path, out)
         write_text(analysis_md_path, _render_analysis_md(out))
@@ -926,16 +999,11 @@ def _build_feasibility_report(
 
 def _render_proposal_md(plan: dict[str, Any]) -> str:
     proposal = plan.get("proposal", {}) if isinstance(plan.get("proposal", {}), dict) else {}
-    knowledge_model = plan.get("knowledge_model", {}) if isinstance(plan.get("knowledge_model", {}), dict) else {}
     lines = [
         f"# Iteration {plan.get('iteration')} Proposal",
         "",
         f"- planner: `{plan.get('planner')}`",
         f"- reason: {plan.get('reason')}",
-        "",
-        "## Knowledge Model",
-        f"- focus_nodes: `{knowledge_model.get('focus_nodes', [])}`",
-        f"- domain_nodes: `{len(knowledge_model.get('domain_hierarchy', []))}`",
         "",
         "## Proposal Summary",
         f"- {proposal.get('proposal_summary', '')}",
@@ -947,6 +1015,108 @@ def _render_proposal_md(plan: dict[str, Any]) -> str:
             f"- title: {item.get('title')} | targets: {item.get('target_node_ids', [])} | role: {item.get('benchmark_role')}"
         )
     return "\n".join(lines)
+
+
+def _empty_knowledge_model(intent: str) -> dict[str, Any]:
+    return {
+        "intent": {"summary": intent},
+        "domain_hierarchy": [],
+        "focus_nodes": [],
+        "generated_at": "",
+        "planner_notes": "Initialized local knowledge model.",
+    }
+
+
+def _update_knowledge_model(
+    current_model: dict[str, Any],
+    intent: str,
+    plan: dict[str, Any],
+    covered_dimensions: list[str],
+    claims: list[dict[str, Any]],
+    required_observability: list[str],
+    iteration: int,
+) -> dict[str, Any]:
+    model = current_model if isinstance(current_model, dict) and isinstance(current_model.get("domain_hierarchy", []), list) else _empty_knowledge_model(intent)
+    hierarchy = [dict(item) for item in model.get("domain_hierarchy", []) if isinstance(item, dict)]
+    nodes_by_id = {str(item.get("id", "")).strip(): item for item in hierarchy if str(item.get("id", "")).strip()}
+    proposal = plan.get("proposal", {}) if isinstance(plan.get("proposal", {}), dict) else {}
+    proposal_items = proposal.get("proposals", []) if isinstance(proposal.get("proposals", []), list) else []
+    covered = {str(x).strip() for x in covered_dimensions if str(x).strip()}
+
+    for item in proposal_items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title", "")).strip()
+        objective = str(item.get("objective", "")).strip()
+        hypothesis = str(item.get("hypothesis", "")).strip()
+        target_ids = [str(x).strip() for x in item.get("target_node_ids", []) if str(x).strip()]
+        if not target_ids:
+            target_ids = [str(x).strip() for x in proposal.get("target_nodes", []) if str(x).strip()]
+        for node_id in target_ids:
+            if not node_id:
+                continue
+            node = nodes_by_id.get(node_id)
+            if node is None:
+                node = {
+                    "id": node_id,
+                    "name": node_id,
+                    "description": objective or title or node_id,
+                    "parent_id": None,
+                    "node_type": "feature",
+                    "status": "unknown",
+                    "rationale": hypothesis or "Added from planner proposal.",
+                    "evidence_refs": [],
+                    "open_gaps": [],
+                }
+                hierarchy.append(node)
+                nodes_by_id[node_id] = node
+            if node_id in covered:
+                node["status"] = "partially_supported"
+            if required_observability:
+                gaps = [str(x).strip() for x in node.get("open_gaps", []) if str(x).strip()]
+                for gap in required_observability:
+                    item_gap = str(gap).strip()
+                    if item_gap and item_gap not in gaps:
+                        gaps.append(item_gap)
+                node["open_gaps"] = gaps[:6]
+
+    for idx, claim in enumerate(claims):
+        if not isinstance(claim, dict):
+            continue
+        for dim in [str(x).strip() for x in claim.get("dimensions", []) if str(x).strip()]:
+            node = nodes_by_id.get(dim)
+            if node is None:
+                node = {
+                    "id": dim,
+                    "name": dim,
+                    "description": f"Observed dimension derived from analysis claim for {dim}.",
+                    "parent_id": None,
+                    "node_type": "feature",
+                    "status": "partially_supported",
+                    "rationale": "Added from analyzer claim.",
+                    "evidence_refs": [],
+                    "open_gaps": [],
+                }
+                hierarchy.append(node)
+                nodes_by_id[dim] = node
+            node["status"] = "partially_supported"
+            refs = [str(x).strip() for x in node.get("evidence_refs", []) if str(x).strip()]
+            ref = f"iter_{iteration:02d}_claim_{idx}"
+            if ref not in refs:
+                refs.append(ref)
+            node["evidence_refs"] = refs[:10]
+
+    focus_nodes = [str(x).strip() for x in proposal.get("target_nodes", []) if str(x).strip()]
+    if not focus_nodes:
+        focus_nodes = [item["id"] for item in hierarchy[: min(3, len(hierarchy))]]
+    return {
+        "intent": {"summary": intent},
+        "domain_hierarchy": hierarchy,
+        "focus_nodes": focus_nodes,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "planner_notes": str(model.get("planner_notes", "Updated incrementally from analyzer outputs.")).strip()
+        or "Updated incrementally from analyzer outputs.",
+    }
 
 
 def _render_research_md(research: dict[str, Any]) -> str:

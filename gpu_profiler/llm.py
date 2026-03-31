@@ -6,6 +6,27 @@ import signal
 from dataclasses import dataclass
 from typing import Any
 
+PLANNER_INPUT_TARGET_CHARS = 6000
+PLANNER_INPUT_HARD_CAP_CHARS = 10000
+PLANNER_RESEARCH_INPUT_TARGET_CHARS = 4000
+PLANNER_RESEARCH_INPUT_HARD_CAP_CHARS = 6000
+CODEGEN_INPUT_TARGET_CHARS = 8000
+CODEGEN_INPUT_HARD_CAP_CHARS = 12000
+
+
+@dataclass
+class ResearchRequestPlanDecision:
+    reason: str
+    research_request: dict[str, Any] | None
+    planner: str
+
+
+@dataclass
+class ProposalPlanDecision:
+    reason: str
+    proposal: dict[str, Any]
+    planner: str
+
 
 @dataclass
 class PlanDecision:
@@ -86,6 +107,26 @@ class LLMWorkflowBackend:
     ) -> PlanDecision:
         raise NotImplementedError
 
+    def plan_research_request(
+        self,
+        intent: str,
+        kb: dict[str, Any],
+        iteration: int,
+        max_iterations: int,
+        max_benchmarks: int,
+    ) -> ResearchRequestPlanDecision:
+        raise NotImplementedError
+
+    def plan_proposal(
+        self,
+        intent: str,
+        kb: dict[str, Any],
+        iteration: int,
+        max_iterations: int,
+        max_benchmarks: int,
+    ) -> ProposalPlanDecision:
+        raise NotImplementedError
+
     def generate_implementation(
         self,
         intent: str,
@@ -152,8 +193,11 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
                     "max_amendment_rounds": 2,
                     "amendment_policy": "Reject below-threshold proposals, keep rationale, and request revised implementation.",
                 },
-                "planner_output": {
-                    "required_keys": ["reason", "knowledge_model", "proposal"],
+                "research_request_output": {
+                    "required_keys": ["reason", "research_request"],
+                },
+                "proposal_output": {
+                    "required_keys": ["reason", "proposal"],
                 },
                 "implementation_output": {
                     "required_keys": ["reason", "benchmarks"],
@@ -209,33 +253,51 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
         max_iterations: int,
         max_benchmarks: int,
     ) -> PlanDecision:
-        target = kb.get("target_dimensions", [])
-        covered = set(kb.get("covered_dimensions", []))
-        uncovered = [d for d in target if d not in covered]
+        research = self.plan_research_request(intent, kb, iteration, max_iterations, max_benchmarks)
+        proposal = self.plan_proposal(intent, kb, iteration, max_iterations, max_benchmarks)
+        return PlanDecision(
+            reason=proposal.reason,
+            knowledge_model=_current_or_default_knowledge_model(kb=kb, intent=intent),
+            proposal=proposal.proposal,
+            research_request=research.research_request,
+            planner=self.name,
+        )
 
-        if iteration >= max_iterations:
-            return PlanDecision(
-                reason="Reached iteration limit.",
-                knowledge_model=_default_knowledge_model(intent=intent, focus_dimensions=[]),
-                proposal=_default_proposal(intent=intent, focus_dimensions=[], iteration=iteration),
+    def plan_research_request(
+        self,
+        intent: str,
+        kb: dict[str, Any],
+        iteration: int,
+        max_iterations: int,
+        max_benchmarks: int,
+    ) -> ResearchRequestPlanDecision:
+        _ = max_iterations
+        focus = _planner_focus_dimensions_from_kb(kb=kb, iteration=iteration, max_benchmarks=max_benchmarks)
+        if not focus:
+            return ResearchRequestPlanDecision(
+                reason="No external research needed for the current planner state.",
                 research_request=None,
                 planner=self.name,
             )
+        return ResearchRequestPlanDecision(
+            reason="Fallback planner produced a generic research request.",
+            research_request=_default_research_request(intent=intent, focus_dimensions=focus),
+            planner=self.name,
+        )
 
-        if not target:
-            focus = [f"dimension_{iteration + 1}"]
-        else:
-            focus = uncovered[: max(1, max_benchmarks)] or target[:1]
-
-        _ = intent
-        knowledge_model = _default_knowledge_model(intent=intent, focus_dimensions=focus)
-        proposal = _default_proposal(intent=intent, focus_dimensions=focus, iteration=iteration)
-        research_request = _default_research_request(intent=intent, focus_dimensions=focus)
-        return PlanDecision(
+    def plan_proposal(
+        self,
+        intent: str,
+        kb: dict[str, Any],
+        iteration: int,
+        max_iterations: int,
+        max_benchmarks: int,
+    ) -> ProposalPlanDecision:
+        _ = max_iterations
+        focus = _planner_focus_dimensions_from_kb(kb=kb, iteration=iteration, max_benchmarks=max_benchmarks)
+        return ProposalPlanDecision(
             reason="Fallback planner produced generic plan items.",
-            knowledge_model=knowledge_model,
-            proposal=proposal,
-            research_request=research_request,
+            proposal=_default_proposal(intent=intent, focus_dimensions=focus, iteration=iteration),
             planner=self.name,
         )
 
@@ -387,7 +449,8 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                         "max_amendment_rounds": "int>=0",
                         "amendment_policy": "str",
                     },
-                    "planner_output": {"required_keys": ["str"]},
+                    "research_request_output": {"required_keys": ["str"]},
+                    "proposal_output": {"required_keys": ["str"]},
                     "implementation_output": {"required_keys": ["str"], "benchmark_required_keys": ["str"]},
                     "analysis_output": {"required_keys": ["str"]},
                 },
@@ -489,33 +552,97 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         max_iterations: int,
         max_benchmarks: int,
     ) -> PlanDecision:
+        research = self.plan_research_request(intent, kb, iteration, max_iterations, max_benchmarks)
+        proposal = self.plan_proposal(intent, kb, iteration, max_iterations, max_benchmarks)
+        return PlanDecision(
+            reason=proposal.reason,
+            knowledge_model=_current_or_default_knowledge_model(kb=kb, intent=intent),
+            proposal=proposal.proposal,
+            research_request=research.research_request,
+            planner=self.name,
+        )
+
+    def plan_research_request(
+        self,
+        intent: str,
+        kb: dict[str, Any],
+        iteration: int,
+        max_iterations: int,
+        max_benchmarks: int,
+    ) -> ResearchRequestPlanDecision:
+        compact_kb = _compact_planner_kb(
+            kb=kb,
+            max_nodes=max(4, max_benchmarks * 3),
+            max_history_items=1,
+            max_research_items=2,
+        )
         payload = {
             "intent": intent,
-            "knowledge_base": kb,
+            "knowledge_base": compact_kb,
             "iteration": iteration,
             "max_iterations": max_iterations,
             "max_benchmarks": max_benchmarks,
             "output_schema": {
                 "reason": "str",
-                "knowledge_model": {
-                    "intent": {"summary": "str"},
-                    "domain_hierarchy": [
-                        {
-                            "id": "str",
-                            "name": "str",
-                            "description": "str",
-                            "parent_id": "str|null",
-                            "node_type": "domain|subdomain|feature|question",
-                            "status": "unknown|hypothesized|partially_supported|well_supported|contradictory",
-                            "rationale": "str",
-                            "evidence_refs": ["str"],
-                            "open_gaps": ["str"],
-                        }
-                    ],
-                    "focus_nodes": ["str"],
-                    "generated_at": "str",
-                    "planner_notes": "str",
+                "research_request": {
+                    "intent_summary": "str",
+                    "request_summary": "str",
+                    "target_nodes": ["str"],
+                    "target_questions": ["str"],
+                    "search_topics": ["str"],
+                    "source_preferences": ["str"],
+                    "source_constraints": ["str"],
+                    "expected_outputs": ["str"],
+                    "notes": "str",
                 },
+            },
+        }
+        payload = _enforce_payload_budget(
+            payload,
+            target_chars=PLANNER_RESEARCH_INPUT_TARGET_CHARS,
+            hard_cap_chars=PLANNER_RESEARCH_INPUT_HARD_CAP_CHARS,
+            trimmers=[_trim_planner_payload],
+        )
+        out = self._json_completion(
+            system=(
+                "You are a planner agent deciding only whether external research is needed next. "
+                "Return strict JSON only. Do not generate proposals, executable code, commands, or profiler invocations."
+            ),
+            user=payload,
+        )
+        research_request = _sanitize_research_request(
+            out.get("research_request", {}),
+            intent=intent,
+            proposal={"target_nodes": _planner_focus_dimensions_from_kb(kb=kb, iteration=iteration, max_benchmarks=max_benchmarks)},
+        )
+        return ResearchRequestPlanDecision(
+            reason=str(out.get("reason", "")).strip(),
+            research_request=research_request,
+            planner=self.name,
+        )
+
+    def plan_proposal(
+        self,
+        intent: str,
+        kb: dict[str, Any],
+        iteration: int,
+        max_iterations: int,
+        max_benchmarks: int,
+    ) -> ProposalPlanDecision:
+        compact_kb = _compact_planner_kb(
+            kb=kb,
+            max_nodes=max(6, max_benchmarks * 4),
+            max_history_items=2,
+            max_research_items=3,
+        )
+        payload = {
+            "intent": intent,
+            "knowledge_base": compact_kb,
+            "iteration": iteration,
+            "max_iterations": max_iterations,
+            "max_benchmarks": max_benchmarks,
+            "output_schema": {
+                "reason": "str",
                 "proposal": {
                     "intent_summary": "str",
                     "proposal_summary": "str",
@@ -540,42 +667,29 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                     "planner_notes": "str",
                     "generated_at": "str",
                 },
-                "research_request": {
-                    "intent_summary": "str",
-                    "request_summary": "str",
-                    "target_nodes": ["str"],
-                    "target_questions": ["str"],
-                    "search_topics": ["str"],
-                    "source_preferences": ["str"],
-                    "source_constraints": ["str"],
-                    "expected_outputs": ["str"],
-                    "notes": "str",
-                },
             },
         }
+        payload = _enforce_payload_budget(
+            payload,
+            target_chars=PLANNER_INPUT_TARGET_CHARS,
+            hard_cap_chars=PLANNER_INPUT_HARD_CAP_CHARS,
+            trimmers=[_trim_planner_payload],
+        )
         out = self._json_completion(
             system=(
                 "You are a planner agent for iterative performance-modeling workflows. Return strict JSON only. "
-                "Generate a domain-specific knowledge hierarchy and a non-executable research proposal from user intent. "
-                "Do not emit executable code, commands, or profiler invocations."
+                "Generate only a non-executable research proposal from the current knowledge model and available research. "
+                "Do not emit executable code, commands, profiler invocations, or a full knowledge model."
             ),
             user=payload,
         )
         focus = _sanitize_dimensions(_proposal_focus_nodes(out.get("proposal", {})), [], max_benchmarks)
         if not focus:
-            focus = [f"dimension_{iteration + 1}"]
-        knowledge_model = _sanitize_knowledge_model(out.get("knowledge_model", {}), intent=intent, focus_nodes=focus)
+            focus = _planner_focus_dimensions_from_kb(kb=kb, iteration=iteration, max_benchmarks=max_benchmarks)
         proposal = _sanitize_proposal(out.get("proposal", {}), intent=intent, focus_nodes=focus, iteration=iteration)
-        research_request = _sanitize_research_request(
-            out.get("research_request", {}),
-            intent=intent,
+        return ProposalPlanDecision(
+            reason=str(out.get("reason", "")).strip(),
             proposal=proposal,
-        )
-        return PlanDecision(
-            reason=str(out.get("reason", "")),
-            knowledge_model=knowledge_model,
-            proposal=proposal,
-            research_request=research_request,
             planner=self.name,
         )
 
@@ -595,10 +709,12 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         reasons: list[str] = []
         amendments: list[dict[str, Any]] = []
         for dim in focus:
+            compact_plan = _compact_codegen_plan(plan=plan, dimension=dim)
+            compact_kb = _compact_codegen_kb(kb=kb, dimension=dim)
             payload = {
                 "intent": intent,
-                "knowledge_base": kb,
-                "plan": plan,
+                "knowledge_base": compact_kb,
+                "plan": compact_plan,
                 "iteration": iteration,
                 "dimension": dim,
                 "output_schema": {
@@ -633,6 +749,12 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                     "no_inventory_only": "Do not return inventory/topology-only probes as benchmarks.",
                 },
             }
+            payload = _enforce_payload_budget(
+                payload,
+                target_chars=CODEGEN_INPUT_TARGET_CHARS,
+                hard_cap_chars=CODEGEN_INPUT_HARD_CAP_CHARS,
+                trimmers=[_trim_codegen_payload],
+            )
             out = self._json_completion(
                 system=(
                     "You are a code-generation agent. Return strict JSON only. "
@@ -851,6 +973,38 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
             alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
             return alt
 
+    def plan_research_request(
+        self,
+        intent: str,
+        kb: dict[str, Any],
+        iteration: int,
+        max_iterations: int,
+        max_benchmarks: int,
+    ) -> ResearchRequestPlanDecision:
+        try:
+            return self._call_primary("plan_research_request", intent, kb, iteration, max_iterations, max_benchmarks)
+        except Exception as exc:  # noqa: BLE001
+            alt = self.fallback.plan_research_request(intent, kb, iteration, max_iterations, max_benchmarks)
+            alt.reason = f"Primary research-request planning failed ({exc}); fallback used. {alt.reason}"
+            alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
+            return alt
+
+    def plan_proposal(
+        self,
+        intent: str,
+        kb: dict[str, Any],
+        iteration: int,
+        max_iterations: int,
+        max_benchmarks: int,
+    ) -> ProposalPlanDecision:
+        try:
+            return self._call_primary("plan_proposal", intent, kb, iteration, max_iterations, max_benchmarks)
+        except Exception as exc:  # noqa: BLE001
+            alt = self.fallback.plan_proposal(intent, kb, iteration, max_iterations, max_benchmarks)
+            alt.reason = f"Primary proposal planning failed ({exc}); fallback used. {alt.reason}"
+            alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
+            return alt
+
     def research_context(
         self,
         intent: str,
@@ -967,6 +1121,312 @@ def _parse_json_object(text: str) -> dict[str, Any]:
     if not match:
         raise ValueError("LLM output did not contain JSON object")
     return json.loads(match.group(0))
+
+
+def _current_or_default_knowledge_model(kb: dict[str, Any], intent: str) -> dict[str, Any]:
+    model = kb.get("current_knowledge_model", {}) if isinstance(kb.get("current_knowledge_model", {}), dict) else {}
+    if isinstance(model.get("domain_hierarchy"), list):
+        return model
+    return _default_knowledge_model(intent=intent, focus_dimensions=[])
+
+
+def _planner_focus_dimensions_from_kb(kb: dict[str, Any], iteration: int, max_benchmarks: int) -> list[str]:
+    model = kb.get("current_knowledge_model", {}) if isinstance(kb.get("current_knowledge_model", {}), dict) else {}
+    hierarchy = model.get("domain_hierarchy", []) if isinstance(model.get("domain_hierarchy", []), list) else []
+    focus: list[str] = []
+    for item in hierarchy:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        if name and name not in focus:
+            focus.append(name)
+        if len(focus) >= max(1, max_benchmarks):
+            return focus
+    target = kb.get("target_dimensions", []) if isinstance(kb.get("target_dimensions", []), list) else []
+    covered = set(str(x).strip() for x in kb.get("covered_dimensions", []) if str(x).strip())
+    uncovered = [str(x).strip() for x in target if str(x).strip() and str(x).strip() not in covered]
+    focus.extend([dim for dim in uncovered if dim not in focus][: max(1, max_benchmarks) - len(focus)])
+    if focus:
+        return focus[: max(1, max_benchmarks)]
+    return [f"dimension_{iteration + 1}"]
+
+
+def _serialized_size_chars(value: Any) -> int:
+    return len(json.dumps(value, sort_keys=True, default=str))
+
+
+def _trim_text(value: Any, max_chars: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 3:
+        return text[:max_chars]
+    return text[: max_chars - 3].rstrip() + "..."
+
+
+def _enforce_payload_budget(
+    payload: dict[str, Any],
+    target_chars: int,
+    hard_cap_chars: int,
+    trimmers: list[Any] | None = None,
+) -> dict[str, Any]:
+    current = payload
+    if _serialized_size_chars(current) <= target_chars:
+        return current
+    for trimmer in trimmers or []:
+        current = trimmer(current, target_chars)
+        if _serialized_size_chars(current) <= hard_cap_chars:
+            break
+    size = _serialized_size_chars(current)
+    if size > hard_cap_chars:
+        raise ValueError(f"LLM payload exceeded hard cap: {size} > {hard_cap_chars}")
+    return current
+
+
+def _compact_planner_kb(
+    kb: dict[str, Any],
+    max_nodes: int = 8,
+    max_history_items: int = 2,
+    max_research_items: int = 3,
+) -> dict[str, Any]:
+    target_dimensions = _sanitize_dimensions(kb.get("target_dimensions", []), [], max_nodes)
+    covered_dimensions = _sanitize_dimensions(kb.get("covered_dimensions", []), [], max_nodes)
+    available_tools = {
+        str(name): bool(enabled)
+        for name, enabled in (kb.get("available_tools", {}) if isinstance(kb.get("available_tools", {}), dict) else {}).items()
+        if enabled
+    }
+    current_model = kb.get("current_knowledge_model", {}) if isinstance(kb.get("current_knowledge_model", {}), dict) else {}
+    compact_model = {
+        "focus_nodes": [str(x).strip() for x in current_model.get("focus_nodes", []) if str(x).strip()][:max_nodes],
+        "domain_hierarchy": _compact_domain_hierarchy(current_model.get("domain_hierarchy", []), max_nodes=max_nodes),
+    }
+    current_proposal = kb.get("current_proposal", {}) if isinstance(kb.get("current_proposal", {}), dict) else {}
+    compact_proposal = {
+        "target_nodes": [str(x).strip() for x in current_proposal.get("target_nodes", []) if str(x).strip()][:max_nodes],
+        "proposals": _compact_proposals(current_proposal.get("proposals", []), max_items=max_nodes),
+    }
+    history = kb.get("history", []) if isinstance(kb.get("history", []), list) else []
+    compact_history = []
+    for item in history[-max_history_items:]:
+        if not isinstance(item, dict):
+            continue
+        compact_history.append(
+            {
+                "iteration": item.get("iteration"),
+                "summary": _trim_text(item.get("summary", ""), 160),
+                "coverage_score": item.get("coverage_score"),
+                "claims_added": item.get("claims_added"),
+                "open_gaps": [str(x).strip() for x in item.get("required_observability", []) if str(x).strip()][:4],
+            }
+        )
+    research_history = kb.get("research_history", []) if isinstance(kb.get("research_history", []), list) else []
+    compact_research = []
+    for item in research_history[-max_history_items:]:
+        if not isinstance(item, dict):
+            continue
+        findings = item.get("findings", []) if isinstance(item.get("findings", []), list) else []
+        compact_research.append(
+            {
+                "iteration": item.get("iteration"),
+                "request_summary": _trim_text(item.get("request_summary", ""), 160),
+                "proposed_dimensions": _sanitize_dimensions(item.get("proposed_dimensions", []), [], max_nodes),
+                "findings": [
+                    {
+                        "title": _trim_text(finding.get("title", ""), 80),
+                        "summary": _trim_text(finding.get("summary", ""), 160),
+                        "source_url": _trim_text(finding.get("source_url", ""), 120),
+                    }
+                    for finding in findings[:max_research_items]
+                    if isinstance(finding, dict)
+                ],
+            }
+        )
+    pending_amendments = kb.get("pending_contract_amendments", []) if isinstance(kb.get("pending_contract_amendments", []), list) else []
+    compact_amendments = [
+        {
+            "path": _trim_text(item.get("path", ""), 80),
+            "change": _trim_text(item.get("change", ""), 160),
+            "priority": _trim_text(item.get("priority", ""), 16),
+        }
+        for item in pending_amendments[:4]
+        if isinstance(item, dict)
+    ]
+    return {
+        "intent": _trim_text(kb.get("intent", ""), 160),
+        "target_dimensions": target_dimensions,
+        "covered_dimensions": covered_dimensions,
+        "coverage_score": kb.get("coverage_score", 0.0),
+        "target_coverage": kb.get("target_coverage", 0.0),
+        "available_tools": available_tools,
+        "current_knowledge_model": compact_model,
+        "current_proposal": compact_proposal,
+        "history": compact_history,
+        "research_history": compact_research,
+        "pending_contract_amendments": compact_amendments,
+    }
+
+
+def _compact_codegen_kb(kb: dict[str, Any], dimension: str) -> dict[str, Any]:
+    available_tools = {
+        str(name): bool(enabled)
+        for name, enabled in (kb.get("available_tools", {}) if isinstance(kb.get("available_tools", {}), dict) else {}).items()
+        if enabled
+    }
+    current_model = kb.get("current_knowledge_model", {}) if isinstance(kb.get("current_knowledge_model", {}), dict) else {}
+    relevant_nodes = _filter_domain_nodes(current_model.get("domain_hierarchy", []), needle=dimension, max_nodes=4)
+    schema_contract = kb.get("schema_contract", {}) if isinstance(kb.get("schema_contract", {}), dict) else {}
+    negotiation = schema_contract.get("negotiation_policy", {}) if isinstance(schema_contract.get("negotiation_policy", {}), dict) else {}
+    return {
+        "intent": _trim_text(kb.get("intent", ""), 160),
+        "target_dimensions": _sanitize_dimensions(kb.get("target_dimensions", []), [], 8),
+        "available_tools": available_tools,
+        "relevant_knowledge_nodes": relevant_nodes,
+        "schema_contract": {
+            "negotiation_policy": {
+                "thresholds": negotiation.get("thresholds", {}),
+                "weights": negotiation.get("weights", {}),
+                "max_amendment_rounds": negotiation.get("max_amendment_rounds"),
+            }
+        },
+    }
+
+
+def _compact_codegen_plan(plan: dict[str, Any], dimension: str) -> dict[str, Any]:
+    proposal = plan.get("proposal", {}) if isinstance(plan.get("proposal", {}), dict) else {}
+    relevant_items = []
+    for item in proposal.get("proposals", []):
+        if not isinstance(item, dict):
+            continue
+        targets = [str(x).strip() for x in item.get("target_node_ids", []) if str(x).strip()]
+        haystack = " ".join(
+            [str(item.get("title", "")), str(item.get("objective", "")), str(item.get("description", "")), " ".join(targets)]
+        ).lower()
+        if dimension.lower() in haystack or not relevant_items:
+            relevant_items.append(
+                {
+                    "id": str(item.get("id", "")).strip(),
+                    "title": _trim_text(item.get("title", ""), 120),
+                    "objective": _trim_text(item.get("objective", ""), 180),
+                    "target_node_ids": targets[:4],
+                    "benchmark_role": _trim_text(item.get("benchmark_role", ""), 24),
+                    "hypothesis": _trim_text(item.get("hypothesis", ""), 180),
+                    "required_evidence": [str(x).strip() for x in item.get("required_evidence", []) if str(x).strip()][:4],
+                    "rationale": _trim_text(item.get("rationale", ""), 180),
+                }
+            )
+        if len(relevant_items) >= 2:
+            break
+    knowledge_model = plan.get("knowledge_model", {}) if isinstance(plan.get("knowledge_model", {}), dict) else {}
+    return {
+        "iteration": plan.get("iteration"),
+        "planner": _trim_text(plan.get("planner", ""), 64),
+        "proposal": {
+            "intent_summary": _trim_text(proposal.get("intent_summary", ""), 160),
+            "proposal_summary": _trim_text(proposal.get("proposal_summary", ""), 180),
+            "target_nodes": [str(x).strip() for x in proposal.get("target_nodes", []) if str(x).strip()][:6],
+            "proposals": relevant_items,
+        },
+        "knowledge_model": {
+            "focus_nodes": [str(x).strip() for x in knowledge_model.get("focus_nodes", []) if str(x).strip()][:6],
+            "domain_hierarchy": _filter_domain_nodes(knowledge_model.get("domain_hierarchy", []), needle=dimension, max_nodes=4),
+        },
+    }
+
+
+def _compact_domain_hierarchy(raw_nodes: list[Any], max_nodes: int) -> list[dict[str, Any]]:
+    compact = []
+    for item in raw_nodes[: max_nodes * 2]:
+        if not isinstance(item, dict):
+            continue
+        node_id = str(item.get("id", "")).strip()
+        name = str(item.get("name", "")).strip()
+        if not node_id or not name:
+            continue
+        compact.append(
+            {
+                "id": node_id,
+                "name": name,
+                "node_type": _trim_text(item.get("node_type", ""), 24),
+                "status": _trim_text(item.get("status", ""), 32),
+                "open_gaps": [str(x).strip() for x in item.get("open_gaps", []) if str(x).strip()][:2],
+            }
+        )
+        if len(compact) >= max_nodes:
+            break
+    return compact
+
+
+def _compact_proposals(raw_proposals: list[Any], max_items: int) -> list[dict[str, Any]]:
+    compact = []
+    for item in raw_proposals[: max_items * 2]:
+        if not isinstance(item, dict):
+            continue
+        compact.append(
+            {
+                "id": str(item.get("id", "")).strip(),
+                "title": _trim_text(item.get("title", ""), 120),
+                "objective": _trim_text(item.get("objective", ""), 180),
+                "target_node_ids": [str(x).strip() for x in item.get("target_node_ids", []) if str(x).strip()][:4],
+                "benchmark_role": _trim_text(item.get("benchmark_role", ""), 24),
+            }
+        )
+        if len(compact) >= max_items:
+            break
+    return compact
+
+
+def _filter_domain_nodes(raw_nodes: list[Any], needle: str, max_nodes: int) -> list[dict[str, Any]]:
+    needle_l = needle.lower().strip()
+    matched = []
+    fallback = []
+    for item in raw_nodes[: max_nodes * 3]:
+        if not isinstance(item, dict):
+            continue
+        compact = {
+            "id": str(item.get("id", "")).strip(),
+            "name": str(item.get("name", "")).strip(),
+            "description": _trim_text(item.get("description", ""), 160),
+            "status": _trim_text(item.get("status", ""), 32),
+            "open_gaps": [str(x).strip() for x in item.get("open_gaps", []) if str(x).strip()][:2],
+        }
+        haystack = " ".join([compact["id"], compact["name"], compact["description"]]).lower()
+        if needle_l and needle_l in haystack:
+            matched.append(compact)
+        elif len(fallback) < max_nodes:
+            fallback.append(compact)
+        if len(matched) >= max_nodes:
+            break
+    return (matched or fallback)[:max_nodes]
+
+
+def _trim_planner_payload(payload: dict[str, Any], _target_chars: int) -> dict[str, Any]:
+    out = json.loads(json.dumps(payload))
+    kb = out.get("knowledge_base", {}) if isinstance(out.get("knowledge_base", {}), dict) else {}
+    if isinstance(kb.get("research_history"), list):
+        kb["research_history"] = kb["research_history"][:1]
+    if isinstance(kb.get("history"), list):
+        kb["history"] = kb["history"][:1]
+    model = kb.get("current_knowledge_model", {}) if isinstance(kb.get("current_knowledge_model", {}), dict) else {}
+    if isinstance(model.get("domain_hierarchy"), list):
+        model["domain_hierarchy"] = model["domain_hierarchy"][:4]
+    proposal = kb.get("current_proposal", {}) if isinstance(kb.get("current_proposal", {}), dict) else {}
+    if isinstance(proposal.get("proposals"), list):
+        proposal["proposals"] = proposal["proposals"][:2]
+    return out
+
+
+def _trim_codegen_payload(payload: dict[str, Any], _target_chars: int) -> dict[str, Any]:
+    out = json.loads(json.dumps(payload))
+    kb = out.get("knowledge_base", {}) if isinstance(out.get("knowledge_base", {}), dict) else {}
+    nodes = kb.get("relevant_knowledge_nodes")
+    if isinstance(nodes, list):
+        kb["relevant_knowledge_nodes"] = nodes[:2]
+    plan = out.get("plan", {}) if isinstance(out.get("plan", {}), dict) else {}
+    proposal = plan.get("proposal", {}) if isinstance(plan.get("proposal", {}), dict) else {}
+    if isinstance(proposal.get("proposals"), list):
+        proposal["proposals"] = proposal["proposals"][:1]
+    return out
 
 
 def _sanitize_dimensions(raw: list[Any], allowed: list[str], max_items: int) -> list[str]:
@@ -1410,14 +1870,29 @@ def _policy_from_contract(contract: dict[str, Any]) -> dict[str, Any]:
 def _merge_schema_contract(contract: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(contract, dict):
         contract = {}
+    legacy_planner = contract.get("planner_output", {}) if isinstance(contract.get("planner_output", {}), dict) else {}
     merged = {
         "version": str(contract.get("version", "1.0")),
         "negotiation_policy": _policy_from_contract(contract),
-        "planner_output": contract.get("planner_output", {}),
+        "research_request_output": contract.get("research_request_output", {}),
+        "proposal_output": contract.get("proposal_output", {}),
         "implementation_output": contract.get("implementation_output", {}),
         "analysis_output": contract.get("analysis_output", {}),
     }
-    for key in ["planner_output", "implementation_output", "analysis_output"]:
+    if not isinstance(merged["research_request_output"], dict):
+        merged["research_request_output"] = {}
+    if not isinstance(merged["proposal_output"], dict):
+        merged["proposal_output"] = {}
+    if legacy_planner:
+        merged["proposal_output"] = {
+            **legacy_planner,
+            **merged["proposal_output"],
+        }
+    if not merged["research_request_output"]:
+        merged["research_request_output"] = {"required_keys": ["reason", "research_request"]}
+    if not merged["proposal_output"]:
+        merged["proposal_output"] = {"required_keys": ["reason", "proposal"]}
+    for key in ["implementation_output", "analysis_output"]:
         if not isinstance(merged[key], dict):
             merged[key] = {}
     return merged

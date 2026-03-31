@@ -75,6 +75,15 @@ class Orchestrator:
         ctx = AgentContext(run_id=run_id, run_dir=run_dir)
 
         dimensions = target_dimensions or DEFAULT_TARGET_DIMENSIONS
+        knowledge_model_path = run_dir / "knowledge_model.json"
+        initial_knowledge_model = {
+            "intent": {"summary": intent},
+            "domain_hierarchy": [],
+            "focus_nodes": [],
+            "generated_at": "",
+            "planner_notes": "Initialized local knowledge model.",
+        }
+        write_json(knowledge_model_path, initial_knowledge_model)
         knowledge_base: dict[str, Any] = {
             "intent": intent,
             "target_dimensions": dimensions,
@@ -97,6 +106,8 @@ class Orchestrator:
             "research_history": [],
             "pending_contract_amendments": [],
             "contract_history": [],
+            "current_knowledge_model": initial_knowledge_model,
+            "knowledge_model_artifact": str(knowledge_model_path),
         }
         kb_path = run_dir / "performance_model.json"
         write_json(kb_path, knowledge_base)
@@ -135,28 +146,29 @@ class Orchestrator:
                 )
                 knowledge_base = self._load_kb(kb_path)
 
-            plan_task = Task(
-                id=f"iter{iteration}-llm-plan-0",
-                kind="llm_plan",
+            research_plan_task = Task(
+                id=f"iter{iteration}-llm-plan-research-0",
+                kind="llm_plan_research",
                 payload={
                     "intent": intent,
                     "iteration": iteration,
                     "max_iterations": max_iterations,
                     "max_benchmarks": max_benchmarks,
                     "knowledge_base": knowledge_base,
+                    "knowledge_model_artifact": knowledge_base.get("knowledge_model_artifact"),
                 },
             )
-            completed.append(self._run_with_retry(plan_task, ctx))
+            completed.append(self._run_with_retry(research_plan_task, ctx))
             self._persist_run_log(run_dir, completed)
-            if plan_task.status != "done":
+            if research_plan_task.status != "done":
                 self._update_run_state(kb_path, status="stopped", reason="planner_failed", iteration=iteration)
                 break
             self._increment_run_counter(kb_path, "planner_calls")
 
-            plan = plan_task.result or {}
-            self._append_planner_outputs(kb_path=kb_path, iteration=iteration, plan=plan)
+            research_plan = research_plan_task.result or {}
+            self._append_planner_research_outputs(kb_path=kb_path, iteration=iteration, result=research_plan)
             knowledge_base = self._load_kb(kb_path)
-            research_request_artifact = plan.get("research_request_artifact")
+            research_request_artifact = research_plan.get("research_request_artifact")
             if research_request_artifact:
                 research_task = Task(
                     id=f"iter{iteration}-llm-research-0",
@@ -178,27 +190,27 @@ class Orchestrator:
                 research = research_task.result or {}
                 self._append_research_history(kb_path=kb_path, iteration=iteration, research=research)
                 knowledge_base = self._load_kb(kb_path)
-
-                refine_plan_task = Task(
-                    id=f"iter{iteration}-llm-plan-1",
-                    kind="llm_plan",
-                    payload={
-                        "intent": intent,
-                        "iteration": iteration,
-                        "max_iterations": max_iterations,
-                        "max_benchmarks": max_benchmarks,
-                        "knowledge_base": knowledge_base,
-                    },
-                )
-                completed.append(self._run_with_retry(refine_plan_task, ctx))
-                self._persist_run_log(run_dir, completed)
-                if refine_plan_task.status != "done":
-                    self._update_run_state(kb_path, status="stopped", reason="planner_refinement_failed", iteration=iteration)
-                    break
-                self._increment_run_counter(kb_path, "planner_calls")
-                plan = refine_plan_task.result or {}
-                self._append_planner_outputs(kb_path=kb_path, iteration=iteration, plan=plan)
-                knowledge_base = self._load_kb(kb_path)
+            proposal_task = Task(
+                id=f"iter{iteration}-llm-plan-proposal-0",
+                kind="llm_plan_proposal",
+                payload={
+                    "intent": intent,
+                    "iteration": iteration,
+                    "max_iterations": max_iterations,
+                    "max_benchmarks": max_benchmarks,
+                    "knowledge_base": knowledge_base,
+                    "knowledge_model_artifact": knowledge_base.get("knowledge_model_artifact"),
+                },
+            )
+            completed.append(self._run_with_retry(proposal_task, ctx))
+            self._persist_run_log(run_dir, completed)
+            if proposal_task.status != "done":
+                self._update_run_state(kb_path, status="stopped", reason="planner_proposal_failed", iteration=iteration)
+                break
+            self._increment_run_counter(kb_path, "planner_calls")
+            plan = proposal_task.result or {}
+            self._append_planner_outputs(kb_path=kb_path, iteration=iteration, plan=plan)
+            knowledge_base = self._load_kb(kb_path)
 
             max_amendment_rounds = self._max_amendments(knowledge_base.get("schema_contract", {}))
             implementation: dict[str, Any] = {}
@@ -279,6 +291,7 @@ class Orchestrator:
                     "iteration": iteration,
                     "max_iterations": max_iterations,
                     "kb_path": str(kb_path),
+                    "knowledge_model_path": str(knowledge_model_path),
                     "plan": plan,
                     "execution_results": (execute_task.result or {}).get("results", []),
                 },
@@ -400,14 +413,26 @@ class Orchestrator:
         }
         write_json(kb_path, kb)
 
+    def _append_planner_research_outputs(self, kb_path: Path, iteration: int, result: dict[str, Any]) -> None:
+        kb = self._load_kb(kb_path)
+        kb.setdefault("proposal_history", [])
+        kb["proposal_history"].append(
+            {
+                "iteration": iteration,
+                "planner": result.get("planner"),
+                "reason": result.get("reason"),
+                "research_request_artifact": result.get("research_request_artifact"),
+                "proposal": None,
+                "timestamp": time.time(),
+            }
+        )
+        write_json(kb_path, kb)
+
     def _append_planner_outputs(self, kb_path: Path, iteration: int, plan: dict[str, Any]) -> None:
         kb = self._load_kb(kb_path)
         kb.setdefault("proposal_history", [])
-        kb.setdefault("knowledge_model_history", [])
         proposal = plan.get("proposal", {})
-        knowledge_model = plan.get("knowledge_model", {})
         kb["current_proposal"] = proposal if isinstance(proposal, dict) else {}
-        kb["current_knowledge_model"] = knowledge_model if isinstance(knowledge_model, dict) else {}
         kb["proposal_history"].append(
             {
                 "iteration": iteration,
@@ -415,17 +440,7 @@ class Orchestrator:
                 "reason": plan.get("reason"),
                 "artifact": plan.get("proposal_artifact"),
                 "artifact_md": plan.get("proposal_md_artifact"),
-                "research_request_artifact": plan.get("research_request_artifact"),
                 "proposal": proposal if isinstance(proposal, dict) else {},
-                "timestamp": time.time(),
-            }
-        )
-        kb["knowledge_model_history"].append(
-            {
-                "iteration": iteration,
-                "planner": plan.get("planner"),
-                "artifact": plan.get("knowledge_model_artifact"),
-                "knowledge_model": knowledge_model if isinstance(knowledge_model, dict) else {},
                 "timestamp": time.time(),
             }
         )
