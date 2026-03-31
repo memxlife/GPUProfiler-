@@ -1,0 +1,235 @@
+# Flow Controller Specification
+
+Version: 0.1
+Status: Draft Flow Controller Contract
+Last Updated: 2026-03-31
+
+## 1. Purpose
+
+The flow controller governs the iterative control flow of the system. It decides when to invoke each agent, manages iteration boundaries, records workflow history, and enforces bounded execution rules.
+
+The flow controller does not own domain reasoning. It is the orchestration-and-control agent.
+
+## 2. Design Principles
+
+The flow controller must follow these principles:
+
+- agent responsibilities must remain separated
+- domain intelligence is delegated to planner, search, codegen, runner, and analyzer
+- flow decisions must be traceable
+- execution must remain bounded by explicit limits
+- failures must be observable and recoverable
+- artifacts and history must not be silently lost
+
+## 3. Scope Boundary
+
+### 3.1 Flow Controller Responsibilities
+
+The flow controller must:
+
+1. Start and end iterations.
+2. Invoke the correct agent sequence.
+3. Pass artifacts between agents.
+4. Enforce retry and timeout policies.
+5. Enforce maximum iteration and execution bounds.
+6. Record workflow state and history.
+7. Decide whether to continue or stop the loop based on explicit stop rules.
+8. Handle agent failures in a traceable way.
+
+### 3.2 Flow Controller Non-Responsibilities
+
+The flow controller must not:
+
+1. Decide domain knowledge hierarchy.
+2. Decide research content or search topics.
+3. Generate implementation code.
+4. Interpret scientific meaning of results.
+5. Generate performance claims.
+6. Rewrite planner, search, codegen, runner, or analyzer outputs to change their meaning.
+
+## 4. Interaction with Other Agents
+
+The flow controller invokes and coordinates:
+
+1. planner
+2. search
+3. codegen
+4. runner
+5. analyzer
+
+The flow controller should treat these agents as role-specialized producers and consumers of artifacts.
+
+## 5. Core Workflow Responsibility
+
+At a high level, the flow controller should manage a loop like:
+
+1. invoke planner
+2. if planner emitted `research_request.json`, invoke search
+3. return search artifacts to planner or planner-consumable state
+4. invoke codegen on planner proposal
+5. inspect feasibility outputs
+6. invoke runner on feasible implementations
+7. invoke analyzer on execution evidence
+8. decide whether another iteration is needed
+
+The exact sequence may evolve, but the flow controller owns the sequence and iteration logic.
+
+## 6. MVP Functions
+
+These functions define the minimum viable flow controller.
+
+### 6.1 Create Run Context
+
+The flow controller must create and maintain a run-level workspace and history record.
+
+### 6.2 Manage Iteration Boundaries
+
+The flow controller must create clear iteration boundaries and preserve iteration-level artifacts.
+
+### 6.3 Invoke Agents in Order
+
+The flow controller must invoke each role in the intended sequence and pass the required artifacts between them.
+
+### 6.4 Enforce Bounds
+
+The flow controller must enforce:
+
+- maximum iterations
+- retry counts
+- timeout or bounded execution policies
+- safety-related execution bounds
+
+### 6.5 Handle Failures
+
+The flow controller must record failures and decide whether to retry, skip, continue, or stop according to explicit policies.
+
+### 6.6 Record Workflow History
+
+The flow controller must preserve workflow history, including:
+
+- task start and completion
+- status
+- artifacts produced
+- errors
+- iteration summaries
+
+### 6.7 Decide Stop or Continue
+
+The flow controller must decide whether to continue iterating based on explicit stop conditions and agent outputs.
+
+## 7. Advanced Functions
+
+These functions improve control quality after MVP is working.
+
+1. Adaptive retry policy.
+2. Better branching control for partial success cases.
+3. Conditional re-entry to planner after codegen infeasibility.
+4. Conditional search invocation based on planner output.
+5. Better run-health monitoring.
+
+## 8. Optional Functions
+
+These functions are useful later and must not block MVP.
+
+1. Multi-branch execution trees.
+2. Parallel agent scheduling.
+3. Priority-based task queues.
+4. User-facing live state interfaces.
+
+## 9. Inputs
+
+The flow controller should read:
+
+1. top-level user intent
+2. system-level run constraints
+3. retry and timeout settings
+4. iteration limit settings
+5. outputs from planner, search, codegen, runner, and analyzer
+
+## 10. Outputs
+
+The flow controller must write:
+
+1. `run_log.json`
+2. run-level history or state artifact
+3. final run summary artifact
+
+It may also update the global or run-local knowledge-base artifact as part of orchestration bookkeeping, but it must not overwrite agent-authored meaning.
+
+## 11. Stop Conditions
+
+At minimum the flow controller should support stop conditions such as:
+
+- maximum iteration count reached
+- planner or analyzer indicates sufficient completion
+- no feasible implementation available
+- repeated unrecoverable failure
+- explicit user-defined stop condition reached
+
+## 12. Failure Handling States
+
+At minimum the flow controller should support:
+
+- `done`
+- `failed`
+- `retrying`
+- `skipped`
+- `stopped`
+
+## 13. `run_log.json` MVP
+
+This artifact is flow-controller-authored and should record the workflow history.
+
+Suggested MVP structure:
+
+```json
+[
+  {
+    "iteration": 0,
+    "task_id": "string",
+    "agent_role": "planner|search|codegen|runner|analyzer|flow_controller",
+    "task_kind": "string",
+    "status": "done|failed|retrying|skipped|stopped",
+    "artifact_refs": ["string"],
+    "error": "string|null",
+    "timestamp": "string"
+  }
+]
+```
+
+## 14. Final Summary Artifact
+
+The flow controller should produce a run-level human-readable summary artifact, for example:
+
+- `run_summary.md`
+
+This summary should explain:
+
+- how many iterations were run
+- which agents were invoked
+- why the process stopped
+- where key artifacts can be found
+
+## 15. Success Criteria
+
+The flow controller is behaving correctly when:
+
+1. It preserves clear iteration structure.
+2. It invokes agents in the intended sequence.
+3. It enforces bounds and retry behavior explicitly.
+4. It preserves workflow history and errors.
+5. It does not take over domain reasoning from the specialized agents.
+
+## 16. MVP Implementation Target
+
+The initial implementation should only aim to satisfy:
+
+- Sections 1 through 6
+- Section 9
+- Section 10
+- Section 11
+- Section 12
+- Section 13
+- Section 14
+
+Advanced and optional functions should be deferred until the MVP is stable.
