@@ -84,19 +84,28 @@ class LLMPlanningAgent(Agent):
             "iteration": iteration,
             "intent": intent,
             "planner": decision.planner,
-            "stop": decision.stop,
             "reason": decision.reason,
-            "focus_dimensions": decision.focus_dimensions,
-            "plan_items": decision.plan_items,
+            "knowledge_model": decision.knowledge_model,
+            "proposal": decision.proposal,
+            "research_request": decision.research_request,
         }
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
         iter_dir.mkdir(parents=True, exist_ok=True)
-        json_path = iter_dir / "plan.json"
-        md_path = iter_dir / "plan.md"
-        write_json(json_path, plan)
-        write_text(md_path, _render_plan_md(plan))
-        plan["artifact"] = str(json_path)
-        plan["artifact_md"] = str(md_path)
+        model_path = iter_dir / "knowledge_model.json"
+        proposal_path = iter_dir / "proposal.json"
+        proposal_md_path = iter_dir / "proposal.md"
+        research_request_path = iter_dir / "research_request.json"
+        write_json(model_path, decision.knowledge_model)
+        write_json(proposal_path, decision.proposal)
+        write_text(proposal_md_path, _render_proposal_md(plan))
+        if isinstance(decision.research_request, dict):
+            write_json(research_request_path, decision.research_request)
+            plan["research_request_artifact"] = str(research_request_path)
+        else:
+            plan["research_request_artifact"] = None
+        plan["knowledge_model_artifact"] = str(model_path)
+        plan["proposal_artifact"] = str(proposal_path)
+        plan["proposal_md_artifact"] = str(proposal_md_path)
         return plan
 
 
@@ -148,14 +157,21 @@ class LLMResearchAgent(Agent):
         return task.kind == "llm_research"
 
     def run(self, task: Task, ctx: AgentContext) -> dict[str, Any]:
-        intent = str(task.payload.get("intent", "")).strip()
         iteration = int(task.payload.get("iteration", 0))
         kb = task.payload.get("knowledge_base", {})
+        request_path = task.payload.get("research_request_artifact")
+        if not request_path:
+            raise ValueError("llm_research requires research_request_artifact")
+        research_request = read_json(Path(request_path), {})
+        if not isinstance(research_request, dict) or not research_request:
+            raise ValueError("research_request_artifact did not contain a valid request object")
+        intent = str(research_request.get("intent_summary", task.payload.get("intent", ""))).strip()
         max_sources = int(task.payload.get("max_sources", 8))
         decision = self.workflow_backend.research_context(
             intent=intent,
             kb=kb,
             iteration=iteration,
+            research_request=research_request,
             max_sources=max_sources,
         )
         result = {
@@ -163,8 +179,11 @@ class LLMResearchAgent(Agent):
             "intent": intent,
             "planner": decision.planner,
             "reason": decision.reason,
+            "request_summary": decision.request_summary,
+            "unanswered_questions": decision.unanswered_questions,
             "findings": decision.findings,
             "proposed_dimensions": decision.proposed_dimensions,
+            "research_request_artifact": str(request_path),
         }
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
         iter_dir.mkdir(parents=True, exist_ok=True)
@@ -177,14 +196,14 @@ class LLMResearchAgent(Agent):
         return result
 
 
-class LLMTestSuiteAgent(Agent):
-    name = "llm-suite"
+class LLMCodegenAgent(Agent):
+    name = "llm-codegen"
 
     def __init__(self, workflow_backend: LLMWorkflowBackend | None = None):
         self.workflow_backend = workflow_backend or HeuristicWorkflowBackend()
 
     def can_handle(self, task: Task) -> bool:
-        return task.kind == "llm_generate_suite"
+        return task.kind == "llm_generate_implementation"
 
     def run(self, task: Task, ctx: AgentContext) -> dict[str, Any]:
         intent = str(task.payload.get("intent", "")).strip()
@@ -195,7 +214,7 @@ class LLMTestSuiteAgent(Agent):
         amendment_round = int(task.payload.get("amendment_round", 0))
         amendment_feedback = task.payload.get("amendment_feedback", [])
 
-        decision = self.workflow_backend.generate_suite(
+        decision = self.workflow_backend.generate_implementation(
             intent=intent,
             kb=kb,
             plan=plan,
@@ -206,8 +225,14 @@ class LLMTestSuiteAgent(Agent):
             benchmarks=decision.benchmarks,
             schema_contract=kb.get("schema_contract", {}),
         )
+        accepted = [_annotate_feasibility(item, policy) for item in accepted]
+        feasibility_report = _build_feasibility_report(
+            accepted=accepted,
+            rejected=rejected,
+            proposal=plan.get("proposal", {}),
+        )
 
-        suite = {
+        implementation = {
             "iteration": iteration,
             "intent": intent,
             "planner": decision.planner,
@@ -215,6 +240,7 @@ class LLMTestSuiteAgent(Agent):
             "benchmarks": accepted,
             "rejected_benchmarks": rejected,
             "contract_amendments": decision.contract_amendments,
+            "feasibility_summary": feasibility_report.get("summary", {}),
             "negotiation": {
                 "policy": policy,
                 "amendment_round": amendment_round,
@@ -226,14 +252,17 @@ class LLMTestSuiteAgent(Agent):
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
         iter_dir.mkdir(parents=True, exist_ok=True)
         generated_files = _materialize_generated_files(iter_dir, accepted)
-        suite["generated_files"] = generated_files
-        json_path = iter_dir / "suite.json"
-        md_path = iter_dir / "suite.md"
-        write_json(json_path, suite)
-        write_text(md_path, _render_suite_md(suite))
-        suite["artifact"] = str(json_path)
-        suite["artifact_md"] = str(md_path)
-        return suite
+        implementation["generated_files"] = generated_files
+        json_path = iter_dir / "implementation.json"
+        md_path = iter_dir / "implementation.md"
+        feasibility_path = iter_dir / "feasibility_report.json"
+        write_json(json_path, implementation)
+        write_json(feasibility_path, feasibility_report)
+        write_text(md_path, _render_implementation_md(implementation))
+        implementation["artifact"] = str(json_path)
+        implementation["artifact_md"] = str(md_path)
+        implementation["feasibility_artifact"] = str(feasibility_path)
+        return implementation
 
 
 class MetricsCollectorAgent(Agent):
@@ -392,7 +421,6 @@ class BenchmarkCycleAgent(Agent):
     def __init__(self):
         self.collector = MetricsCollectorAgent()
         self.runner = WorkloadRunnerAgent()
-        self.analyzer = AnalyzerAgent()
 
     def can_handle(self, task: Task) -> bool:
         return task.kind == "run_benchmark_cycle"
@@ -426,20 +454,6 @@ class BenchmarkCycleAgent(Agent):
         post_path = bench_dir / "metrics_post_workload.json"
         write_json(post_path, post_records)
 
-        baseline_summary = self.analyzer._summarize(baseline_records)
-        post_summary = self.analyzer._summarize(post_records)
-        analysis = {
-            "baseline": baseline_summary,
-            "post_workload": post_summary,
-            "delta": {
-                "gpu_util_avg": _delta(baseline_summary.get("gpu_util_avg"), post_summary.get("gpu_util_avg")),
-                "power_avg_w": _delta(baseline_summary.get("power_avg_w"), post_summary.get("power_avg_w")),
-                "temp_avg_c": _delta(baseline_summary.get("temp_avg_c"), post_summary.get("temp_avg_c")),
-            },
-        }
-        analysis_path = bench_dir / "analysis.json"
-        write_json(analysis_path, analysis)
-
         result = {
             "iteration": iteration,
             "benchmark_id": benchmark_id,
@@ -449,8 +463,11 @@ class BenchmarkCycleAgent(Agent):
             "baseline_artifact": str(baseline_path),
             "post_artifact": str(post_path),
             "workload_artifact": workload_result.get("artifact"),
-            "analysis_artifact": str(analysis_path),
-            "analysis": analysis,
+            "raw_artifacts": [
+                {"path": str(baseline_path), "kind": "metric"},
+                {"path": str(post_path), "kind": "metric"},
+                {"path": str(workload_result.get("artifact", "")), "kind": "log"},
+            ],
             "workload": workload_result,
             "provenance": benchmark.get("provenance", {}),
         }
@@ -467,14 +484,14 @@ class BenchmarkExecutorAgent(Agent):
         self.cycle_agent = BenchmarkCycleAgent()
 
     def can_handle(self, task: Task) -> bool:
-        return task.kind == "execute_suite"
+        return task.kind == "execute_implementation"
 
     def run(self, task: Task, ctx: AgentContext) -> dict[str, Any]:
         iteration = int(task.payload.get("iteration", 0))
         samples = int(task.payload.get("samples", 3))
         interval_sec = float(task.payload.get("interval_sec", 0.5))
-        suite = task.payload.get("suite", {})
-        benchmarks = suite.get("benchmarks", [])
+        implementation = task.payload.get("implementation", task.payload.get("suite", {}))
+        benchmarks = implementation.get("benchmarks", [])
 
         results: list[dict[str, Any]] = []
         for idx, benchmark in enumerate(benchmarks):
@@ -493,7 +510,7 @@ class BenchmarkExecutorAgent(Agent):
 
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
         iter_dir.mkdir(parents=True, exist_ok=True)
-        out = iter_dir / "suite_results.json"
+        out = iter_dir / "execution_results.json"
         payload = {"iteration": iteration, "benchmarks_run": len(results), "results": results}
         write_json(out, payload)
         payload["artifact"] = str(out)
@@ -516,13 +533,13 @@ class LLMAnalysisAgent(Agent):
         kb_path = Path(task.payload.get("kb_path") or (ctx.run_dir / "performance_model.json"))
         kb = read_json(kb_path, {})
         plan = task.payload.get("plan", {})
-        suite_results = task.payload.get("suite_results", [])
+        execution_results = task.payload.get("execution_results", [])
 
         decision = self.workflow_backend.analyze_results(
             intent=intent,
             kb=kb,
             plan=plan,
-            suite_results=suite_results,
+            execution_results=execution_results,
             iteration=iteration,
             max_iterations=max_iterations,
         )
@@ -530,7 +547,7 @@ class LLMAnalysisAgent(Agent):
         covered = sorted(set(kb.get("covered_dimensions", [])).union(decision.covered_dimensions))
         target = kb.get("target_dimensions", [])
         if not target:
-            target = _infer_target_dimensions(plan=plan, suite_results=suite_results, claims=decision.claims)
+            target = _infer_target_dimensions(plan=plan, execution_results=execution_results, claims=decision.claims)
             kb["target_dimensions"] = target
         coverage_score = 0.0
         if target:
@@ -591,11 +608,22 @@ class AutonomousReporterAgent(Agent):
 
     def run(self, _task: Task, ctx: AgentContext) -> dict[str, Any]:
         model = read_json(ctx.run_dir / "performance_model.json", {})
+        run_state = model.get("run_state", {}) if isinstance(model.get("run_state", {}), dict) else {}
         lines = [
             f"# Autonomous GPU Performance Model ({ctx.run_id})",
             "",
             "## Intent",
             f"- `{model.get('intent', '')}`",
+            "",
+            "## Run State",
+            f"- status: `{run_state.get('status', '')}`",
+            f"- reason: `{run_state.get('reason', '')}`",
+            f"- iterations_completed: `{run_state.get('iterations_completed', 0)}`",
+            f"- planner_calls: `{run_state.get('planner_calls', 0)}`",
+            f"- search_calls: `{run_state.get('search_calls', 0)}`",
+            f"- codegen_calls: `{run_state.get('codegen_calls', 0)}`",
+            f"- runner_calls: `{run_state.get('runner_calls', 0)}`",
+            f"- analyzer_calls: `{run_state.get('analyzer_calls', 0)}`",
             "",
             "## Coverage",
             f"- target_dimensions: `{model.get('target_dimensions', [])}`",
@@ -655,7 +683,7 @@ def default_agents(workflow_backend: LLMWorkflowBackend | None = None) -> list[A
         LLMSchemaContractAgent(workflow_backend=backend),
         LLMResearchAgent(workflow_backend=backend),
         LLMPlanningAgent(workflow_backend=backend),
-        LLMTestSuiteAgent(workflow_backend=backend),
+        LLMCodegenAgent(workflow_backend=backend),
         MetricsCollectorAgent(),
         SystemInfoAgent(),
         WorkloadRunnerAgent(),
@@ -797,22 +825,120 @@ def _apply_negotiation_policy(
     return accepted, rejected, policy
 
 
-def _render_plan_md(plan: dict[str, Any]) -> str:
+def _implementation_complexity(benchmark: dict[str, Any]) -> str:
+    files = benchmark.get("files", []) if isinstance(benchmark.get("files", []), list) else []
+    command = str(benchmark.get("command", "")).strip().lower()
+    command_length = len(command)
+    file_count = len(files)
+    profiler_count = sum(1 for tool in ["ncu", "nsys"] if tool in command)
+    if file_count >= 5 or command_length > 500 or profiler_count >= 2:
+        return "excessive"
+    if file_count >= 4 or command_length > 260 or profiler_count == 1:
+        return "high"
+    if file_count >= 3 or command_length > 120:
+        return "medium"
+    return "low"
+
+
+def _annotate_feasibility(benchmark: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    out = dict(benchmark)
+    thresholds = policy.get("thresholds", {}) if isinstance(policy, dict) else {}
+    impl_min = _coerce_unit(thresholds.get("implementability_min"), 0.55)
+    scores = out.get("scores", {}) if isinstance(out.get("scores", {}), dict) else {}
+    implementability = _coerce_unit(scores.get("implementability_score"), 0.5)
+    complexity = _implementation_complexity(out)
+    status = "feasible"
+    if complexity in {"high", "excessive"} or implementability < max(impl_min + 0.1, 0.75):
+        status = "feasible_with_revision"
+    out["implementation_complexity"] = complexity
+    out["feasibility_status"] = status
+    return out
+
+
+def _build_feasibility_report(
+    accepted: list[dict[str, Any]], rejected: list[dict[str, Any]], proposal: dict[str, Any]
+) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    proposal_artifact = ""
+    if isinstance(proposal, dict):
+        proposal_artifact = str(proposal.get("artifact", "")).strip()
+    for item in accepted:
+        benchmark_id = str(item.get("id", "")).strip()
+        complexity = str(item.get("implementation_complexity", "medium")).strip() or "medium"
+        feasibility_status = str(item.get("feasibility_status", "feasible")).strip() or "feasible"
+        recommended_changes: list[str] = []
+        if feasibility_status == "feasible_with_revision":
+            recommended_changes.append("Reduce implementation complexity or split this proposal into smaller steps.")
+        items.append(
+            {
+                "proposal_id": benchmark_id,
+                "feasibility_status": feasibility_status,
+                "implementation_complexity": complexity,
+                "summary": "Implementation can be generated under the current codegen constraints.",
+                "blocking_issues": [],
+                "evidence_refs": [str(entry.get("path", "")).strip() for entry in item.get("files", []) if str(entry.get("path", "")).strip()],
+                "planner_feedback": {
+                    "revise": feasibility_status != "feasible",
+                    "recommended_changes": recommended_changes,
+                },
+            }
+        )
+    for item in rejected:
+        reasons = [str(x).strip() for x in item.get("reasons", []) if str(x).strip()]
+        recommend = ["Revise the proposal to improve implementability and reduce implementation risk."]
+        if "implementability_below_min" in reasons:
+            recommend.append("Simplify the implementation scope or reduce dependency/tooling assumptions.")
+        if "utility_below_min" in reasons or "coverage_gain_below_min" in reasons:
+            recommend.append("Clarify why this benchmark is needed at the current curriculum stage.")
+        items.append(
+            {
+                "proposal_id": str(item.get("id", "")).strip(),
+                "feasibility_status": "not_feasible",
+                "implementation_complexity": "excessive" if "implementability_below_min" in reasons else "high",
+                "summary": "Implementation was rejected during codegen acceptance checks.",
+                "blocking_issues": reasons,
+                "evidence_refs": [],
+                "planner_feedback": {
+                    "revise": True,
+                    "recommended_changes": recommend,
+                },
+            }
+        )
+    summary = {
+        "item_count": len(items),
+        "feasible_count": sum(1 for item in items if item.get("feasibility_status") == "feasible"),
+        "revision_needed_count": sum(1 for item in items if item.get("feasibility_status") == "feasible_with_revision"),
+        "not_feasible_count": sum(1 for item in items if item.get("feasibility_status") == "not_feasible"),
+    }
+    return {
+        "proposal_artifact": proposal_artifact,
+        "items": items,
+        "summary": summary,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+def _render_proposal_md(plan: dict[str, Any]) -> str:
+    proposal = plan.get("proposal", {}) if isinstance(plan.get("proposal", {}), dict) else {}
+    knowledge_model = plan.get("knowledge_model", {}) if isinstance(plan.get("knowledge_model", {}), dict) else {}
     lines = [
-        f"# Iteration {plan.get('iteration')} Plan",
+        f"# Iteration {plan.get('iteration')} Proposal",
         "",
         f"- planner: `{plan.get('planner')}`",
-        f"- stop: `{plan.get('stop')}`",
         f"- reason: {plan.get('reason')}",
         "",
-        "## Focus Dimensions",
-        f"- {plan.get('focus_dimensions', [])}",
+        "## Knowledge Model",
+        f"- focus_nodes: `{knowledge_model.get('focus_nodes', [])}`",
+        f"- domain_nodes: `{len(knowledge_model.get('domain_hierarchy', []))}`",
         "",
-        "## Plan Items",
+        "## Proposal Summary",
+        f"- {proposal.get('proposal_summary', '')}",
+        "",
+        "## Proposed Benchmarks",
     ]
-    for item in plan.get("plan_items", []):
+    for item in proposal.get("proposals", []):
         lines.append(
-            f"- objective: {item.get('objective')} | dimension: {item.get('dimension')} | success: {item.get('success_criteria')}"
+            f"- title: {item.get('title')} | targets: {item.get('target_node_ids', [])} | role: {item.get('benchmark_role')}"
         )
     return "\n".join(lines)
 
@@ -842,44 +968,48 @@ def _render_research_md(research: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _render_suite_md(suite: dict[str, Any]) -> str:
+def _render_implementation_md(implementation: dict[str, Any]) -> str:
     lines = [
-        f"# Iteration {suite.get('iteration')} Suite",
+        f"# Iteration {implementation.get('iteration')} Implementation",
         "",
-        f"- planner: `{suite.get('planner')}`",
-        f"- reason: {suite.get('reason')}",
+        f"- planner: `{implementation.get('planner')}`",
+        f"- reason: {implementation.get('reason')}",
         "",
         "## Benchmarks",
     ]
-    for bench in suite.get("benchmarks", []):
+    for bench in implementation.get("benchmarks", []):
         lines.extend(
             [
                 f"- id: `{bench.get('id')}`",
                 f"- dimensions: `{bench.get('dimensions', [])}`",
                 f"- hypothesis: {bench.get('hypothesis')}",
+                f"- feasibility_status: `{bench.get('feasibility_status')}`",
+                f"- implementation_complexity: `{bench.get('implementation_complexity')}`",
                 f"- scores: `{bench.get('scores', {})}`",
                 f"- utility_score: `{bench.get('utility_score')}`",
                 f"- command: `{bench.get('command')}`",
                 "",
             ]
         )
-    if suite.get("rejected_benchmarks"):
+    if implementation.get("feasibility_summary"):
+        lines.extend(["## Feasibility Summary", f"- {implementation.get('feasibility_summary')}"])
+    if implementation.get("rejected_benchmarks"):
         lines.extend(["## Rejected Benchmarks"])
-        for item in suite.get("rejected_benchmarks", []):
+        for item in implementation.get("rejected_benchmarks", []):
             lines.append(
                 f"- id: `{item.get('id')}` | reasons: `{item.get('reasons', [])}` | scores: `{item.get('scores', {})}`"
             )
-    if suite.get("negotiation"):
-        lines.extend(["## Negotiation", f"- {suite.get('negotiation')}"])
-    if suite.get("contract_amendments"):
+    if implementation.get("negotiation"):
+        lines.extend(["## Negotiation", f"- {implementation.get('negotiation')}"])
+    if implementation.get("contract_amendments"):
         lines.extend(["## Contract Amendments"])
-        for item in suite.get("contract_amendments", []):
+        for item in implementation.get("contract_amendments", []):
             lines.append(
                 f"- path: `{item.get('path')}` | change: {item.get('change')} | priority: `{item.get('priority')}`"
             )
-    if suite.get("generated_files"):
+    if implementation.get("generated_files"):
         lines.extend(["## Generated Files"])
-        for path in suite.get("generated_files", []):
+        for path in implementation.get("generated_files", []):
             lines.append(f"- `{path}`")
     return "\n".join(lines)
 
@@ -920,14 +1050,15 @@ def _materialize_generated_files(iter_dir: Path, benchmarks: list[dict[str, Any]
 
 
 def _infer_target_dimensions(
-    plan: dict[str, Any], suite_results: list[dict[str, Any]], claims: list[dict[str, Any]]
+    plan: dict[str, Any], execution_results: list[dict[str, Any]], claims: list[dict[str, Any]]
 ) -> list[str]:
     dims: list[str] = []
-    for d in plan.get("focus_dimensions", []):
+    proposal = plan.get("proposal", {}) if isinstance(plan.get("proposal", {}), dict) else {}
+    for d in proposal.get("target_nodes", []):
         dim = str(d).strip()
         if dim and dim not in dims:
             dims.append(dim)
-    for res in suite_results:
+    for res in execution_results:
         for d in res.get("dimensions", []):
             dim = str(d).strip()
             if dim and dim not in dims:

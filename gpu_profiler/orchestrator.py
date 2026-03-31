@@ -83,6 +83,16 @@ class Orchestrator:
             "target_coverage": target_coverage,
             "available_tools": self._detect_available_tools(),
             "history": [],
+            "run_state": {
+                "status": "running",
+                "reason": "autonomous_run_started",
+                "iterations_completed": 0,
+                "planner_calls": 0,
+                "search_calls": 0,
+                "codegen_calls": 0,
+                "runner_calls": 0,
+                "analyzer_calls": 0,
+            },
             "claims": [],
             "research_history": [],
             "pending_contract_amendments": [],
@@ -125,24 +135,6 @@ class Orchestrator:
                 )
                 knowledge_base = self._load_kb(kb_path)
 
-            research_task = Task(
-                id=f"iter{iteration}-llm-research-0",
-                kind="llm_research",
-                payload={
-                    "intent": intent,
-                    "iteration": iteration,
-                    "knowledge_base": knowledge_base,
-                    "max_sources": 10,
-                },
-            )
-            completed.append(self._run_with_retry(research_task, ctx))
-            self._persist_run_log(run_dir, completed)
-            if research_task.status != "done":
-                break
-            research = research_task.result or {}
-            self._append_research_history(kb_path=kb_path, iteration=iteration, research=research)
-            knowledge_base = self._load_kb(kb_path)
-
             plan_task = Task(
                 id=f"iter{iteration}-llm-plan-0",
                 kind="llm_plan",
@@ -157,20 +149,65 @@ class Orchestrator:
             completed.append(self._run_with_retry(plan_task, ctx))
             self._persist_run_log(run_dir, completed)
             if plan_task.status != "done":
+                self._update_run_state(kb_path, status="stopped", reason="planner_failed", iteration=iteration)
                 break
+            self._increment_run_counter(kb_path, "planner_calls")
 
             plan = plan_task.result or {}
-            if plan.get("stop", False):
-                break
+            self._append_planner_outputs(kb_path=kb_path, iteration=iteration, plan=plan)
+            knowledge_base = self._load_kb(kb_path)
+            research_request_artifact = plan.get("research_request_artifact")
+            if research_request_artifact:
+                research_task = Task(
+                    id=f"iter{iteration}-llm-research-0",
+                    kind="llm_research",
+                    payload={
+                        "intent": intent,
+                        "iteration": iteration,
+                        "knowledge_base": knowledge_base,
+                        "research_request_artifact": research_request_artifact,
+                        "max_sources": 10,
+                    },
+                )
+                completed.append(self._run_with_retry(research_task, ctx))
+                self._persist_run_log(run_dir, completed)
+                if research_task.status != "done":
+                    self._update_run_state(kb_path, status="stopped", reason="search_failed", iteration=iteration)
+                    break
+                self._increment_run_counter(kb_path, "search_calls")
+                research = research_task.result or {}
+                self._append_research_history(kb_path=kb_path, iteration=iteration, research=research)
+                knowledge_base = self._load_kb(kb_path)
+
+                refine_plan_task = Task(
+                    id=f"iter{iteration}-llm-plan-1",
+                    kind="llm_plan",
+                    payload={
+                        "intent": intent,
+                        "iteration": iteration,
+                        "max_iterations": max_iterations,
+                        "max_benchmarks": max_benchmarks,
+                        "knowledge_base": knowledge_base,
+                    },
+                )
+                completed.append(self._run_with_retry(refine_plan_task, ctx))
+                self._persist_run_log(run_dir, completed)
+                if refine_plan_task.status != "done":
+                    self._update_run_state(kb_path, status="stopped", reason="planner_refinement_failed", iteration=iteration)
+                    break
+                self._increment_run_counter(kb_path, "planner_calls")
+                plan = refine_plan_task.result or {}
+                self._append_planner_outputs(kb_path=kb_path, iteration=iteration, plan=plan)
+                knowledge_base = self._load_kb(kb_path)
 
             max_amendment_rounds = self._max_amendments(knowledge_base.get("schema_contract", {}))
-            suite: dict[str, Any] = {}
-            suite_task: Task | None = None
+            implementation: dict[str, Any] = {}
+            implementation_task: Task | None = None
             amendment_feedback: list[dict[str, Any]] = []
             for amend_round in range(max_amendment_rounds + 1):
-                suite_task = Task(
-                    id=f"iter{iteration}-llm-suite-{amend_round}",
-                    kind="llm_generate_suite",
+                implementation_task = Task(
+                    id=f"iter{iteration}-llm-implementation-{amend_round}",
+                    kind="llm_generate_implementation",
                     payload={
                         "intent": intent,
                         "iteration": iteration,
@@ -181,45 +218,48 @@ class Orchestrator:
                         "amendment_feedback": amendment_feedback,
                     },
                 )
-                completed.append(self._run_with_retry(suite_task, ctx))
+                completed.append(self._run_with_retry(implementation_task, ctx))
                 self._persist_run_log(run_dir, completed)
-                if suite_task.status != "done":
+                if implementation_task.status != "done":
+                    self._update_run_state(kb_path, status="stopped", reason="codegen_failed", iteration=iteration)
                     break
-                suite = suite_task.result or {}
-                benchmarks = suite.get("benchmarks", [])
+                self._increment_run_counter(kb_path, "codegen_calls")
+                implementation = implementation_task.result or {}
+                benchmarks = implementation.get("benchmarks", [])
                 if benchmarks:
                     break
-                amendment_feedback = suite.get("rejected_benchmarks", [])
-                self._append_negotiation_history(
+                amendment_feedback = implementation.get("rejected_benchmarks", [])
+                self._append_codegen_history(
                     kb_path=kb_path,
                     iteration=iteration,
                     amendment_round=amend_round,
-                    suite=suite,
+                    implementation=implementation,
                 )
-            if not suite_task or suite_task.status != "done":
+            if not implementation_task or implementation_task.status != "done":
                 break
-            benchmarks = suite.get("benchmarks", [])
+            benchmarks = implementation.get("benchmarks", [])
             if not benchmarks:
+                self._update_run_state(kb_path, status="stopped", reason="no_feasible_implementation", iteration=iteration)
                 break
-            self._append_negotiation_history(
+            self._append_codegen_history(
                 kb_path=kb_path,
                 iteration=iteration,
-                amendment_round=int(suite.get("negotiation", {}).get("amendment_round", 0)),
-                suite=suite,
+                amendment_round=int(implementation.get("negotiation", {}).get("amendment_round", 0)),
+                implementation=implementation,
             )
             self._append_pending_contract_amendments(
                 kb_path=kb_path,
                 iteration=iteration,
-                proposer=(suite.get("planner") or "llm-suite"),
-                amendments=suite.get("contract_amendments", []),
+                proposer=(implementation.get("planner") or "llm-codegen"),
+                amendments=implementation.get("contract_amendments", []),
             )
 
             execute_task = Task(
-                id=f"iter{iteration}-execute-suite-0",
-                kind="execute_suite",
+                id=f"iter{iteration}-execute-implementation-0",
+                kind="execute_implementation",
                 payload={
                     "iteration": iteration,
-                    "suite": suite,
+                    "implementation": implementation,
                     "samples": samples,
                     "interval_sec": interval_sec,
                 },
@@ -227,7 +267,9 @@ class Orchestrator:
             completed.append(self._run_with_retry(execute_task, ctx))
             self._persist_run_log(run_dir, completed)
             if execute_task.status != "done":
+                self._update_run_state(kb_path, status="stopped", reason="runner_failed", iteration=iteration)
                 break
+            self._increment_run_counter(kb_path, "runner_calls")
 
             analysis_task = Task(
                 id=f"iter{iteration}-llm-analysis-0",
@@ -238,13 +280,16 @@ class Orchestrator:
                     "max_iterations": max_iterations,
                     "kb_path": str(kb_path),
                     "plan": plan,
-                    "suite_results": (execute_task.result or {}).get("results", []),
+                    "execution_results": (execute_task.result or {}).get("results", []),
                 },
             )
             completed.append(self._run_with_retry(analysis_task, ctx))
             self._persist_run_log(run_dir, completed)
             if analysis_task.status != "done":
+                self._update_run_state(kb_path, status="stopped", reason="analyzer_failed", iteration=iteration)
                 break
+            self._increment_run_counter(kb_path, "analyzer_calls")
+            self._update_run_state(kb_path, status="running", reason="iteration_completed", iteration=iteration + 1)
 
             analysis_result = analysis_task.result or {}
             self._append_pending_contract_amendments(
@@ -255,9 +300,13 @@ class Orchestrator:
             )
             veto_next_plan = bool(analysis_result.get("veto_next_plan", False))
             if float(analysis_result.get("coverage_score", 0.0)) >= target_coverage and not veto_next_plan:
+                self._update_run_state(kb_path, status="stopped", reason="target_coverage_reached", iteration=iteration + 1)
                 break
             if bool(analysis_result.get("stop", False)) and not veto_next_plan:
+                self._update_run_state(kb_path, status="stopped", reason="analyzer_requested_stop", iteration=iteration + 1)
                 break
+        else:
+            self._update_run_state(kb_path, status="stopped", reason="max_iterations_reached", iteration=max_iterations)
 
         final_task = Task(id="final-autonomous-report-0", kind="autonomous_report", payload={})
         completed.append(self._run_with_retry(final_task, ctx))
@@ -299,17 +348,20 @@ class Orchestrator:
         except Exception:
             return 0
 
-    def _append_negotiation_history(self, kb_path: Path, iteration: int, amendment_round: int, suite: dict[str, Any]) -> None:
+    def _append_codegen_history(
+        self, kb_path: Path, iteration: int, amendment_round: int, implementation: dict[str, Any]
+    ) -> None:
         kb = self._load_kb(kb_path)
-        kb.setdefault("negotiation_history", [])
-        kb["negotiation_history"].append(
+        kb.setdefault("codegen_history", [])
+        kb["codegen_history"].append(
             {
                 "iteration": iteration,
                 "amendment_round": amendment_round,
-                "accepted_count": len(suite.get("benchmarks", [])),
-                "rejected_count": len(suite.get("rejected_benchmarks", [])),
-                "rejected": suite.get("rejected_benchmarks", []),
-                "policy": suite.get("negotiation", {}).get("policy", {}),
+                "accepted_count": len(implementation.get("benchmarks", [])),
+                "rejected_count": len(implementation.get("rejected_benchmarks", [])),
+                "rejected": implementation.get("rejected_benchmarks", []),
+                "policy": implementation.get("negotiation", {}).get("policy", {}),
+                "artifact": implementation.get("artifact"),
                 "timestamp": time.time(),
             }
         )
@@ -346,6 +398,55 @@ class Orchestrator:
             "artifact": research.get("artifact"),
             "findings_count": len(findings) if isinstance(findings, list) else 0,
         }
+        write_json(kb_path, kb)
+
+    def _append_planner_outputs(self, kb_path: Path, iteration: int, plan: dict[str, Any]) -> None:
+        kb = self._load_kb(kb_path)
+        kb.setdefault("proposal_history", [])
+        kb.setdefault("knowledge_model_history", [])
+        proposal = plan.get("proposal", {})
+        knowledge_model = plan.get("knowledge_model", {})
+        kb["current_proposal"] = proposal if isinstance(proposal, dict) else {}
+        kb["current_knowledge_model"] = knowledge_model if isinstance(knowledge_model, dict) else {}
+        kb["proposal_history"].append(
+            {
+                "iteration": iteration,
+                "planner": plan.get("planner"),
+                "reason": plan.get("reason"),
+                "artifact": plan.get("proposal_artifact"),
+                "artifact_md": plan.get("proposal_md_artifact"),
+                "research_request_artifact": plan.get("research_request_artifact"),
+                "proposal": proposal if isinstance(proposal, dict) else {},
+                "timestamp": time.time(),
+            }
+        )
+        kb["knowledge_model_history"].append(
+            {
+                "iteration": iteration,
+                "planner": plan.get("planner"),
+                "artifact": plan.get("knowledge_model_artifact"),
+                "knowledge_model": knowledge_model if isinstance(knowledge_model, dict) else {},
+                "timestamp": time.time(),
+            }
+        )
+        write_json(kb_path, kb)
+
+    def _increment_run_counter(self, kb_path: Path, counter_name: str) -> None:
+        kb = self._load_kb(kb_path)
+        run_state = kb.setdefault("run_state", {})
+        try:
+            run_state[counter_name] = int(run_state.get(counter_name, 0)) + 1
+        except Exception:
+            run_state[counter_name] = 1
+        write_json(kb_path, kb)
+
+    def _update_run_state(self, kb_path: Path, status: str, reason: str, iteration: int) -> None:
+        kb = self._load_kb(kb_path)
+        run_state = kb.setdefault("run_state", {})
+        run_state["status"] = status
+        run_state["reason"] = reason
+        run_state["iterations_completed"] = max(int(run_state.get("iterations_completed", 0)), int(iteration))
+        run_state["updated_at"] = time.time()
         write_json(kb_path, kb)
 
     def _append_pending_contract_amendments(

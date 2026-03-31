@@ -7,15 +7,15 @@ from typing import Any
 
 @dataclass
 class PlanDecision:
-    stop: bool
     reason: str
-    focus_dimensions: list[str]
-    plan_items: list[dict[str, Any]]
+    knowledge_model: dict[str, Any]
+    proposal: dict[str, Any]
+    research_request: dict[str, Any] | None
     planner: str
 
 
 @dataclass
-class SuiteDecision:
+class ImplementationDecision:
     reason: str
     benchmarks: list[dict[str, Any]]
     negotiation: dict[str, Any]
@@ -47,6 +47,8 @@ class ContractDecision:
 @dataclass
 class ResearchDecision:
     reason: str
+    request_summary: str
+    unanswered_questions: list[str]
     findings: list[dict[str, Any]]
     proposed_dimensions: list[str]
     planner: str
@@ -67,6 +69,7 @@ class LLMWorkflowBackend:
         intent: str,
         kb: dict[str, Any],
         iteration: int,
+        research_request: dict[str, Any] | None = None,
         max_sources: int = 8,
     ) -> ResearchDecision:
         raise NotImplementedError
@@ -81,14 +84,14 @@ class LLMWorkflowBackend:
     ) -> PlanDecision:
         raise NotImplementedError
 
-    def generate_suite(
+    def generate_implementation(
         self,
         intent: str,
         kb: dict[str, Any],
         plan: dict[str, Any],
         iteration: int,
         max_benchmarks: int,
-    ) -> SuiteDecision:
+    ) -> ImplementationDecision:
         raise NotImplementedError
 
     def analyze_results(
@@ -96,7 +99,7 @@ class LLMWorkflowBackend:
         intent: str,
         kb: dict[str, Any],
         plan: dict[str, Any],
-        suite_results: list[dict[str, Any]],
+        execution_results: list[dict[str, Any]],
         iteration: int,
         max_iterations: int,
     ) -> AnalysisDecision:
@@ -145,12 +148,12 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
                         "observability_score": 0.3,
                     },
                     "max_amendment_rounds": 2,
-                    "amendment_policy": "Reject below-threshold proposals, keep rationale, and request revised suite.",
+                    "amendment_policy": "Reject below-threshold proposals, keep rationale, and request revised implementation.",
                 },
                 "planner_output": {
-                    "required_keys": ["stop", "reason", "focus_dimensions", "plan_items"],
+                    "required_keys": ["reason", "knowledge_model", "proposal"],
                 },
-                "suite_output": {
+                "implementation_output": {
                     "required_keys": ["reason", "benchmarks"],
                     "benchmark_required_keys": [
                         "id",
@@ -181,11 +184,16 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
         intent: str,
         kb: dict[str, Any],
         iteration: int,
+        research_request: dict[str, Any] | None = None,
         max_sources: int = 8,
     ) -> ResearchDecision:
         _ = (intent, kb, iteration, max_sources)
         return ResearchDecision(
             reason="Heuristic backend does not perform online research.",
+            request_summary=str((research_request or {}).get("request_summary", "")).strip(),
+            unanswered_questions=[
+                str(x).strip() for x in (research_request or {}).get("target_questions", []) if str(x).strip()
+            ],
             findings=[],
             proposed_dimensions=[],
             planner=self.name,
@@ -205,10 +213,10 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
 
         if iteration >= max_iterations:
             return PlanDecision(
-                stop=True,
                 reason="Reached iteration limit.",
-                focus_dimensions=[],
-                plan_items=[],
+                knowledge_model=_default_knowledge_model(intent=intent, focus_dimensions=[]),
+                proposal=_default_proposal(intent=intent, focus_dimensions=[], iteration=iteration),
+                research_request=None,
                 planner=self.name,
             )
 
@@ -218,32 +226,27 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
             focus = uncovered[: max(1, max_benchmarks)] or target[:1]
 
         _ = intent
-        plan_items = [
-            {
-                "objective": f"Design executable benchmark for {dim}",
-                "dimension": dim,
-                "success_criteria": "Benchmark executes and yields auditable artifacts.",
-            }
-            for dim in focus
-        ]
+        knowledge_model = _default_knowledge_model(intent=intent, focus_dimensions=focus)
+        proposal = _default_proposal(intent=intent, focus_dimensions=focus, iteration=iteration)
+        research_request = _default_research_request(intent=intent, focus_dimensions=focus)
         return PlanDecision(
-            stop=False,
             reason="Fallback planner produced generic plan items.",
-            focus_dimensions=focus,
-            plan_items=plan_items,
+            knowledge_model=knowledge_model,
+            proposal=proposal,
+            research_request=research_request,
             planner=self.name,
         )
 
-    def generate_suite(
+    def generate_implementation(
         self,
         intent: str,
         kb: dict[str, Any],
         plan: dict[str, Any],
         iteration: int,
         max_benchmarks: int,
-    ) -> SuiteDecision:
+    ) -> ImplementationDecision:
         _ = (intent, kb)
-        focus = plan.get("focus_dimensions", [])[: max(1, max_benchmarks)]
+        focus = _proposal_focus_nodes(plan.get("proposal", {}))[: max(1, max_benchmarks)]
         benchmarks = []
         for idx, dim in enumerate(focus or [f"dimension_{iteration + 1}"]):
             benchmarks.append(
@@ -277,8 +280,8 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
                     "provenance": {"planner": self.name},
                 }
             )
-        return SuiteDecision(
-            reason="Fallback suite generator emitted generic placeholders.",
+        return ImplementationDecision(
+            reason="Fallback code generator emitted generic placeholders.",
             benchmarks=benchmarks,
             negotiation={"accepted": [], "rejected": [], "policy": _default_negotiation_policy()},
             contract_amendments=[],
@@ -290,14 +293,14 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
         intent: str,
         kb: dict[str, Any],
         plan: dict[str, Any],
-        suite_results: list[dict[str, Any]],
+        execution_results: list[dict[str, Any]],
         iteration: int,
         max_iterations: int,
     ) -> AnalysisDecision:
         _ = (intent, plan)
         covered = set(kb.get("covered_dimensions", []))
         claims: list[dict[str, Any]] = []
-        for item in suite_results:
+        for item in execution_results:
             workload = item.get("workload", {})
             if workload.get("returncode") == 0 and not workload.get("skipped", False):
                 dims = [str(d) for d in item.get("dimensions", []) if str(d)]
@@ -322,10 +325,10 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
         stop = coverage >= float(kb.get("target_coverage", 0.9)) or iteration + 1 >= max_iterations
         failed_or_skipped = [
             item
-            for item in suite_results
+            for item in execution_results
             if item.get("workload", {}).get("returncode") != 0 or item.get("workload", {}).get("skipped", False)
         ]
-        veto_next_plan = len(failed_or_skipped) == len(suite_results) and len(suite_results) > 0
+        veto_next_plan = len(failed_or_skipped) == len(execution_results) and len(execution_results) > 0
         return AnalysisDecision(
             summary="Fallback analysis updated claims from executable evidence.",
             claims=claims,
@@ -358,7 +361,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             "iteration": iteration,
             "max_iterations": max_iterations,
             "task": (
-                "Planner agent, suite generator agent, and analysis agent collaboratively define "
+                "Planner agent, code-generation agent, and analysis agent collaboratively define "
                 "a shared JSON contract for this iteration."
             ),
             "output_schema": {
@@ -382,14 +385,14 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                         "amendment_policy": "str",
                     },
                     "planner_output": {"required_keys": ["str"]},
-                    "suite_output": {"required_keys": ["str"], "benchmark_required_keys": ["str"]},
+                    "implementation_output": {"required_keys": ["str"], "benchmark_required_keys": ["str"]},
                     "analysis_output": {"required_keys": ["str"]},
                 },
             },
         }
         out = self._json_completion(
             system=(
-                "You are three collaborating agents: planner, suite-generator, analyzer. "
+                "You are three collaborating agents: planner, code-generator, analyzer. "
                 "Negotiate and return one strict JSON contract all agents must follow. "
                 "Return strict JSON only."
             ),
@@ -410,19 +413,23 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         intent: str,
         kb: dict[str, Any],
         iteration: int,
+        research_request: dict[str, Any] | None = None,
         max_sources: int = 8,
     ) -> ResearchDecision:
+        request = research_request or {}
         payload = {
             "intent": intent,
             "knowledge_base": kb,
             "iteration": iteration,
+            "research_request": request,
             "max_sources": max_sources,
             "task": (
-                "Search online for GPU architecture and profiling benchmark knowledge relevant to the intent. "
+                "Search online only within the scope requested by the planner-authored research request. "
                 "Prioritize vendor docs, profiler docs, papers, and reproducible benchmark methodologies."
             ),
             "output_schema": {
                 "reason": "str",
+                "request_summary": "str",
                 "findings": [
                     {
                         "title": "str",
@@ -431,13 +438,14 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                         "source_url": "str",
                     }
                 ],
+                "unanswered_questions": ["str"],
                 "proposed_dimensions": ["str"],
             },
         }
         out = self._json_completion(
             system=(
-                "You are a research agent. Use web search to gather high-quality sources and synthesize actionable "
-                "benchmarking knowledge for the planner. Return strict JSON only."
+                "You are a planner-directed search agent. Use web search to answer the planner's research request. "
+                "Stay within scope unless minor search refinement is necessary. Return strict JSON only."
             ),
             user=payload,
             tools=[{"type": "web_search_preview"}],
@@ -463,6 +471,8 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         dims = _sanitize_dimensions(out.get("proposed_dimensions", []), [], 24)
         return ResearchDecision(
             reason=str(out.get("reason", "")),
+            request_summary=str(out.get("request_summary", request.get("request_summary", ""))).strip(),
+            unanswered_questions=[str(x).strip() for x in out.get("unanswered_questions", []) if str(x).strip()],
             findings=clean_findings,
             proposed_dimensions=dims,
             planner=self.name,
@@ -483,48 +493,98 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             "max_iterations": max_iterations,
             "max_benchmarks": max_benchmarks,
             "output_schema": {
-                "stop": "bool",
                 "reason": "str",
-                "focus_dimensions": ["str"],
-                "plan_items": [{"objective": "str", "dimension": "str", "success_criteria": "str"}],
-                "plan_files": [
-                    {"path": "str(.md|.json|.cu)", "type": "md|json|cu", "content": "str"}
-                ],
+                "knowledge_model": {
+                    "intent": {"summary": "str"},
+                    "domain_hierarchy": [
+                        {
+                            "id": "str",
+                            "name": "str",
+                            "description": "str",
+                            "parent_id": "str|null",
+                            "node_type": "domain|subdomain|feature|question",
+                            "status": "unknown|hypothesized|partially_supported|well_supported|contradictory",
+                            "rationale": "str",
+                            "evidence_refs": ["str"],
+                            "open_gaps": ["str"],
+                        }
+                    ],
+                    "focus_nodes": ["str"],
+                    "generated_at": "str",
+                    "planner_notes": "str",
+                },
+                "proposal": {
+                    "intent_summary": "str",
+                    "proposal_summary": "str",
+                    "target_nodes": ["str"],
+                    "proposals": [
+                        {
+                            "id": "str",
+                            "title": "str",
+                            "objective": "str",
+                            "target_node_ids": ["str"],
+                            "priority": "high|medium|low",
+                            "benchmark_role": "baseline|isolation|sweep|interaction|stress|refinement|validation",
+                            "description": "str",
+                            "hypothesis": "str",
+                            "required_evidence": ["str"],
+                            "rationale": "str",
+                            "prerequisites": ["str"],
+                            "next_if_success": ["str"],
+                            "next_if_failure": ["str"],
+                        }
+                    ],
+                    "planner_notes": "str",
+                    "generated_at": "str",
+                },
+                "research_request": {
+                    "intent_summary": "str",
+                    "request_summary": "str",
+                    "target_nodes": ["str"],
+                    "target_questions": ["str"],
+                    "search_topics": ["str"],
+                    "source_preferences": ["str"],
+                    "source_constraints": ["str"],
+                    "expected_outputs": ["str"],
+                    "notes": "str",
+                },
             },
         }
         out = self._json_completion(
             system=(
                 "You are a planner agent for iterative performance-modeling workflows. Return strict JSON only. "
-                "Generate domain-specific profiling plan content from user intent (do not rely on hardcoded templates). "
-                "When helpful, emit plan-related files (.md/.json/.cu) in plan_files."
+                "Generate a domain-specific knowledge hierarchy and a non-executable research proposal from user intent. "
+                "Do not emit executable code, commands, or profiler invocations."
             ),
             user=payload,
         )
-        focus = _sanitize_dimensions(out.get("focus_dimensions", []), kb.get("target_dimensions", []), max_benchmarks)
-        plan_items = out.get("plan_items", [])
-        if not isinstance(plan_items, list):
-            plan_items = []
-        if not focus:
-            focus = _dims_from_plan_items(plan_items, max_benchmarks)
+        focus = _sanitize_dimensions(_proposal_focus_nodes(out.get("proposal", {})), [], max_benchmarks)
         if not focus:
             focus = [f"dimension_{iteration + 1}"]
+        knowledge_model = _sanitize_knowledge_model(out.get("knowledge_model", {}), intent=intent, focus_nodes=focus)
+        proposal = _sanitize_proposal(out.get("proposal", {}), intent=intent, focus_nodes=focus, iteration=iteration)
+        research_request = _sanitize_research_request(
+            out.get("research_request", {}),
+            intent=intent,
+            proposal=proposal,
+        )
         return PlanDecision(
-            stop=bool(out.get("stop", False)) and not focus,
             reason=str(out.get("reason", "")),
-            focus_dimensions=focus[: max(1, max_benchmarks)],
-            plan_items=plan_items[: max(1, max_benchmarks)],
+            knowledge_model=knowledge_model,
+            proposal=proposal,
+            research_request=research_request,
             planner=self.name,
         )
 
-    def generate_suite(
+    def generate_implementation(
         self,
         intent: str,
         kb: dict[str, Any],
         plan: dict[str, Any],
         iteration: int,
         max_benchmarks: int,
-    ) -> SuiteDecision:
-        focus = [str(x).strip() for x in plan.get("focus_dimensions", []) if str(x).strip()]
+    ) -> ImplementationDecision:
+        focus = _proposal_focus_nodes(plan.get("proposal", {}))
         if not focus:
             focus = [f"dimension_{iteration + 1}"]
         focus = focus[: max(1, max_benchmarks)]
@@ -572,7 +632,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             }
             out = self._json_completion(
                 system=(
-                    "You are a suite-generation agent. Return strict JSON only. "
+                    "You are a code-generation agent. Return strict JSON only. "
                     "Generate exactly one concrete benchmark for the requested dimension. "
                     "The benchmark implementation must be CUDA C++ source (.cu), and the command must compile and/or run it "
                     "(for example with nvcc and executable invocation). Do not use Python benchmark scripts."
@@ -589,10 +649,10 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             target_dimensions=kb.get("target_dimensions", []),
             max_benchmarks=max_benchmarks,
             planner_name=self.name,
-            focus_dimensions=plan.get("focus_dimensions", []),
+            focus_dimensions=_proposal_focus_nodes(plan.get("proposal", {})),
             contract=kb.get("schema_contract", {}),
         )
-        return SuiteDecision(
+        return ImplementationDecision(
             reason="; ".join([r for r in reasons if r]).strip(),
             benchmarks=benches,
             negotiation={"accepted": [], "rejected": [], "policy": _policy_from_contract(kb.get("schema_contract", {}))},
@@ -605,7 +665,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         intent: str,
         kb: dict[str, Any],
         plan: dict[str, Any],
-        suite_results: list[dict[str, Any]],
+        execution_results: list[dict[str, Any]],
         iteration: int,
         max_iterations: int,
     ) -> AnalysisDecision:
@@ -613,7 +673,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             "intent": intent,
             "knowledge_base": kb,
             "plan": plan,
-            "suite_results": suite_results,
+            "execution_results": execution_results,
             "iteration": iteration,
             "max_iterations": max_iterations,
             "output_schema": {
@@ -765,29 +825,30 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
         intent: str,
         kb: dict[str, Any],
         iteration: int,
+        research_request: dict[str, Any] | None = None,
         max_sources: int = 8,
     ) -> ResearchDecision:
         try:
-            return self.primary.research_context(intent, kb, iteration, max_sources)
+            return self.primary.research_context(intent, kb, iteration, research_request, max_sources)
         except Exception as exc:  # noqa: BLE001
-            alt = self.fallback.research_context(intent, kb, iteration, max_sources)
+            alt = self.fallback.research_context(intent, kb, iteration, research_request, max_sources)
             alt.reason = f"Primary research failed ({exc}); fallback used. {alt.reason}"
             alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
             return alt
 
-    def generate_suite(
+    def generate_implementation(
         self,
         intent: str,
         kb: dict[str, Any],
         plan: dict[str, Any],
         iteration: int,
         max_benchmarks: int,
-    ) -> SuiteDecision:
+    ) -> ImplementationDecision:
         try:
-            return self.primary.generate_suite(intent, kb, plan, iteration, max_benchmarks)
+            return self.primary.generate_implementation(intent, kb, plan, iteration, max_benchmarks)
         except Exception as exc:  # noqa: BLE001
-            alt = self.fallback.generate_suite(intent, kb, plan, iteration, max_benchmarks)
-            alt.reason = f"Primary suite generation failed ({exc}); fallback used. {alt.reason}"
+            alt = self.fallback.generate_implementation(intent, kb, plan, iteration, max_benchmarks)
+            alt.reason = f"Primary implementation generation failed ({exc}); fallback used. {alt.reason}"
             alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
             return alt
 
@@ -796,14 +857,14 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
         intent: str,
         kb: dict[str, Any],
         plan: dict[str, Any],
-        suite_results: list[dict[str, Any]],
+        execution_results: list[dict[str, Any]],
         iteration: int,
         max_iterations: int,
     ) -> AnalysisDecision:
         try:
-            return self.primary.analyze_results(intent, kb, plan, suite_results, iteration, max_iterations)
+            return self.primary.analyze_results(intent, kb, plan, execution_results, iteration, max_iterations)
         except Exception as exc:  # noqa: BLE001
-            alt = self.fallback.analyze_results(intent, kb, plan, suite_results, iteration, max_iterations)
+            alt = self.fallback.analyze_results(intent, kb, plan, execution_results, iteration, max_iterations)
             alt.reason = f"Primary analysis failed ({exc}); fallback used. {alt.reason}"
             alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
             return alt
@@ -840,15 +901,228 @@ def _sanitize_dimensions(raw: list[Any], allowed: list[str], max_items: int) -> 
     return out
 
 
-def _dims_from_plan_items(plan_items: list[dict[str, Any]], max_items: int) -> list[str]:
+def _default_knowledge_model(intent: str, focus_dimensions: list[str]) -> dict[str, Any]:
+    hierarchy: list[dict[str, Any]] = []
+    for idx, dim in enumerate(focus_dimensions):
+        hierarchy.append(
+            {
+                "id": f"feature_{idx}",
+                "name": dim,
+                "description": f"Domain feature derived from planning intent: {dim}",
+                "parent_id": None,
+                "node_type": "feature",
+                "status": "unknown",
+                "rationale": "No verified local evidence yet.",
+                "evidence_refs": [],
+                "open_gaps": [f"Need a baseline benchmark proposal for {dim}."],
+            }
+        )
+    return {
+        "intent": {"summary": intent},
+        "domain_hierarchy": hierarchy,
+        "focus_nodes": [item["id"] for item in hierarchy],
+        "generated_at": "",
+        "planner_notes": "Fallback knowledge model.",
+    }
+
+
+def _default_proposal(intent: str, focus_dimensions: list[str], iteration: int) -> dict[str, Any]:
+    proposals: list[dict[str, Any]] = []
+    target_nodes: list[str] = []
+    for idx, dim in enumerate(focus_dimensions):
+        node_id = f"feature_{idx}"
+        target_nodes.append(node_id)
+        proposals.append(
+            {
+                "id": f"proposal_{iteration}_{idx}",
+                "title": f"Baseline benchmark for {dim}",
+                "objective": f"Establish the first measurable characterization for {dim}.",
+                "target_node_ids": [node_id],
+                "priority": "high",
+                "benchmark_role": "baseline",
+                "description": f"Start with a simple benchmark that isolates {dim}.",
+                "hypothesis": f"A minimal benchmark can produce first evidence for {dim}.",
+                "required_evidence": ["Successful execution", "Auditable measurement artifacts"],
+                "rationale": "Curriculum-first proposal from fallback planner.",
+                "prerequisites": [],
+                "next_if_success": [f"Expand {dim} into a parameter sweep."],
+                "next_if_failure": [f"Simplify or repair the benchmark design for {dim}."],
+            }
+        )
+    return {
+        "intent_summary": intent,
+        "proposal_summary": "Fallback non-executable proposal.",
+        "target_nodes": target_nodes,
+        "proposals": proposals,
+        "planner_notes": "Fallback proposal generated without domain-specific executable content.",
+        "generated_at": "",
+    }
+
+
+def _default_research_request(intent: str, focus_dimensions: list[str]) -> dict[str, Any]:
+    if not focus_dimensions:
+        return {
+            "intent_summary": intent,
+            "request_summary": "",
+            "target_nodes": [],
+            "target_questions": [],
+            "search_topics": [],
+            "source_preferences": [],
+            "source_constraints": [],
+            "expected_outputs": [],
+            "notes": "",
+        }
+    return {
+        "intent_summary": intent,
+        "request_summary": "Gather external background knowledge for the current planner focus.",
+        "target_nodes": focus_dimensions[:3],
+        "target_questions": [f"What established methods and prior knowledge exist for {item}?" for item in focus_dimensions[:3]],
+        "search_topics": focus_dimensions[:5],
+        "source_preferences": ["vendor_doc", "official_tool_doc", "paper", "article"],
+        "source_constraints": [],
+        "expected_outputs": ["benchmark methodology", "architecture background", "observability guidance"],
+        "notes": "Fallback planner-generated research request.",
+    }
+
+
+def _sanitize_knowledge_model(raw: dict[str, Any], intent: str, focus_nodes: list[str]) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raw = {}
+    hierarchy = raw.get("domain_hierarchy", [])
+    clean_hierarchy: list[dict[str, Any]] = []
+    if isinstance(hierarchy, list):
+        for item in hierarchy[:200]:
+            if not isinstance(item, dict):
+                continue
+            node_id = str(item.get("id", "")).strip()
+            name = str(item.get("name", "")).strip()
+            if not node_id or not name:
+                continue
+            clean_hierarchy.append(
+                {
+                    "id": node_id,
+                    "name": name,
+                    "description": str(item.get("description", "")).strip(),
+                    "parent_id": item.get("parent_id"),
+                    "node_type": str(item.get("node_type", "feature")).strip() or "feature",
+                    "status": str(item.get("status", "unknown")).strip() or "unknown",
+                    "rationale": str(item.get("rationale", "")).strip(),
+                    "evidence_refs": [str(x).strip() for x in item.get("evidence_refs", []) if str(x).strip()],
+                    "open_gaps": [str(x).strip() for x in item.get("open_gaps", []) if str(x).strip()],
+                }
+            )
+    if not clean_hierarchy:
+        return _default_knowledge_model(intent=intent, focus_dimensions=focus_nodes)
+    valid_node_ids = {item["id"] for item in clean_hierarchy}
+    sanitized_focus = [node for node in focus_nodes if node in valid_node_ids]
+    if not sanitized_focus:
+        sanitized_focus = [item["id"] for item in clean_hierarchy[: min(3, len(clean_hierarchy))]]
+    return {
+        "intent": {"summary": str(raw.get("intent", {}).get("summary", intent)).strip() or intent},
+        "domain_hierarchy": clean_hierarchy,
+        "focus_nodes": sanitized_focus,
+        "generated_at": str(raw.get("generated_at", "")).strip(),
+        "planner_notes": str(raw.get("planner_notes", "")).strip(),
+    }
+
+
+def _sanitize_proposal(raw: dict[str, Any], intent: str, focus_nodes: list[str], iteration: int) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raw = {}
+    proposals_raw = raw.get("proposals", [])
+    clean_proposals: list[dict[str, Any]] = []
+    if isinstance(proposals_raw, list):
+        for idx, item in enumerate(proposals_raw[:50]):
+            if not isinstance(item, dict):
+                continue
+            proposal_id = str(item.get("id", "")).strip() or f"proposal_{iteration}_{idx}"
+            title = str(item.get("title", "")).strip()
+            objective = str(item.get("objective", "")).strip()
+            if not title or not objective:
+                continue
+            clean_proposals.append(
+                {
+                    "id": proposal_id,
+                    "title": title,
+                    "objective": objective,
+                    "target_node_ids": [str(x).strip() for x in item.get("target_node_ids", []) if str(x).strip()],
+                    "priority": _sanitize_priority(item.get("priority", "medium")),
+                    "benchmark_role": _sanitize_benchmark_role(item.get("benchmark_role", "baseline")),
+                    "description": str(item.get("description", "")).strip(),
+                    "hypothesis": str(item.get("hypothesis", "")).strip(),
+                    "required_evidence": [str(x).strip() for x in item.get("required_evidence", []) if str(x).strip()],
+                    "rationale": str(item.get("rationale", "")).strip(),
+                    "prerequisites": [str(x).strip() for x in item.get("prerequisites", []) if str(x).strip()],
+                    "next_if_success": [str(x).strip() for x in item.get("next_if_success", []) if str(x).strip()],
+                    "next_if_failure": [str(x).strip() for x in item.get("next_if_failure", []) if str(x).strip()],
+                }
+            )
+    if not clean_proposals:
+        return _default_proposal(intent=intent, focus_dimensions=focus_nodes, iteration=iteration)
+    target_nodes = [str(x).strip() for x in raw.get("target_nodes", []) if str(x).strip()]
+    if not target_nodes:
+        target_nodes = _proposal_focus_nodes({"proposals": clean_proposals})
+    return {
+        "intent_summary": str(raw.get("intent_summary", intent)).strip() or intent,
+        "proposal_summary": str(raw.get("proposal_summary", "")).strip(),
+        "target_nodes": target_nodes,
+        "proposals": clean_proposals,
+        "planner_notes": str(raw.get("planner_notes", "")).strip(),
+        "generated_at": str(raw.get("generated_at", "")).strip(),
+    }
+
+
+def _sanitize_research_request(raw: dict[str, Any], intent: str, proposal: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        raw = {}
+    target_nodes = [str(x).strip() for x in raw.get("target_nodes", []) if str(x).strip()]
+    target_questions = [str(x).strip() for x in raw.get("target_questions", []) if str(x).strip()]
+    search_topics = [str(x).strip() for x in raw.get("search_topics", []) if str(x).strip()]
+    if not any([target_nodes, target_questions, search_topics]):
+        fallback_focus = [str(x).strip() for x in proposal.get("target_nodes", []) if str(x).strip()]
+        if not fallback_focus:
+            return None
+        return _default_research_request(intent=intent, focus_dimensions=fallback_focus)
+    return {
+        "intent_summary": str(raw.get("intent_summary", intent)).strip() or intent,
+        "request_summary": str(raw.get("request_summary", "")).strip(),
+        "target_nodes": target_nodes,
+        "target_questions": target_questions,
+        "search_topics": search_topics,
+        "source_preferences": [str(x).strip() for x in raw.get("source_preferences", []) if str(x).strip()],
+        "source_constraints": [str(x).strip() for x in raw.get("source_constraints", []) if str(x).strip()],
+        "expected_outputs": [str(x).strip() for x in raw.get("expected_outputs", []) if str(x).strip()],
+        "notes": str(raw.get("notes", "")).strip(),
+    }
+
+
+def _proposal_focus_nodes(proposal: dict[str, Any]) -> list[str]:
+    if not isinstance(proposal, dict):
+        return []
     out: list[str] = []
-    for item in plan_items:
-        dim = str(item.get("dimension", "")).strip()
-        if dim and dim not in out:
-            out.append(dim)
-        if len(out) >= max_items:
-            break
+    for item in proposal.get("target_nodes", []):
+        node = str(item).strip()
+        if node and node not in out:
+            out.append(node)
+    for item in proposal.get("proposals", []):
+        if not isinstance(item, dict):
+            continue
+        for node_item in item.get("target_node_ids", []):
+            node = str(node_item).strip()
+            if node and node not in out:
+                out.append(node)
     return out
+
+
+def _sanitize_priority(value: Any) -> str:
+    priority = str(value).strip().lower()
+    return priority if priority in {"high", "medium", "low"} else "medium"
+
+
+def _sanitize_benchmark_role(value: Any) -> str:
+    role = str(value).strip().lower()
+    allowed = {"baseline", "isolation", "sweep", "interaction", "stress", "refinement", "validation"}
+    return role if role in allowed else "baseline"
 
 
 def _dims_from_claims(claims: list[dict[str, Any]]) -> list[str]:
@@ -1021,7 +1295,7 @@ def _default_negotiation_policy() -> dict[str, Any]:
             "observability_score": 0.3,
         },
         "max_amendment_rounds": 2,
-        "amendment_policy": "Reject below-threshold proposals and request a revised suite with explicit rationale.",
+        "amendment_policy": "Reject below-threshold proposals and request a revised implementation with explicit rationale.",
     }
 
 
@@ -1056,10 +1330,10 @@ def _merge_schema_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "version": str(contract.get("version", "1.0")),
         "negotiation_policy": _policy_from_contract(contract),
         "planner_output": contract.get("planner_output", {}),
-        "suite_output": contract.get("suite_output", {}),
+        "implementation_output": contract.get("implementation_output", {}),
         "analysis_output": contract.get("analysis_output", {}),
     }
-    for key in ["planner_output", "suite_output", "analysis_output"]:
+    for key in ["planner_output", "implementation_output", "analysis_output"]:
         if not isinstance(merged[key], dict):
             merged[key] = {}
     return merged

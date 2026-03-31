@@ -43,8 +43,9 @@ python gpu_autoprofile.py autonomous \
 Autonomous artifacts include:
 - `performance_model.json` (versioned claims and coverage state)
 - `autonomous_report.md`
-- `iterations/iter_XX/plan.json` and `plan.md` (LLM planner output)
-- `iterations/iter_XX/suite.json` and `suite.md` (LLM suite generator output)
+- `iterations/iter_XX/knowledge_model.json` (planner-owned knowledge hierarchy)
+- `iterations/iter_XX/proposal.json` and `proposal.md` (planner-owned non-executable proposal)
+- `iterations/iter_XX/implementation.json` and `implementation.md` (LLM code generator output)
 - `iterations/iter_XX/bench_YY_*/benchmark_result.json` (benchmark executor results)
 - `iterations/iter_XX/analysis_update.json` (LLM analyzer + KB update)
 
@@ -60,14 +61,14 @@ Default autonomous modeling dimensions are fine-grained and include compute and 
 (SM throughput, occupancy, instruction mix, L1/L2 behavior, global memory bandwidth/latency, interconnect transfer, shared memory, and thermal/power stability).
 
 Autonomous loop structure:
-1. LLM schema-contract agent negotiates shared JSON structure for planner/suite/analysis outputs.
-2. LLM planner proposes detailed profiling plan from intent + knowledge base.
-3. LLM suite generator creates concrete benchmark suite from the plan.
-4. Benchmark executor runs suite and collects artifacts.
+1. LLM schema-contract agent negotiates shared JSON structure for planner/codegen/analysis outputs.
+2. LLM planner produces a knowledge model plus a non-executable proposal from intent + knowledge base.
+3. LLM code generator creates concrete benchmark implementation artifacts from the planner proposal.
+4. Benchmark executor runs the generated implementation and collects artifacts.
 5. LLM analysis agent extracts claims, updates knowledge base, and decides whether to continue.
 6. Repeat until planner/analysis stops or max iteration count is reached.
 
-The autonomous knowledge base records local tool availability (`ncu`, `nsys`, etc.) and the LLM suite generator prefers those tools when present.
+The autonomous knowledge base records local tool availability (`ncu`, `nsys`, etc.) and the LLM code generator prefers those tools when present.
 
 Design note:
 - Python orchestration code is generic workflow infrastructure.

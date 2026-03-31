@@ -104,9 +104,14 @@ def test_autonomous_run_produces_model_artifacts(tmp_path):
 
     assert (run_dir / "performance_model.json").exists()
     assert (run_dir / "autonomous_report.md").exists()
+    assert (run_dir / "iterations" / "iter_00" / "research_request.json").exists()
     assert (run_dir / "iterations" / "iter_00" / "research.json").exists()
-    assert (run_dir / "iterations" / "iter_00" / "plan.json").exists()
-    assert (run_dir / "iterations" / "iter_00" / "suite.json").exists()
+    assert (run_dir / "iterations" / "iter_00" / "knowledge_model.json").exists()
+    assert (run_dir / "iterations" / "iter_00" / "proposal.json").exists()
+    assert (run_dir / "iterations" / "iter_00" / "proposal.md").exists()
+    assert (run_dir / "iterations" / "iter_00" / "implementation.json").exists()
+    assert (run_dir / "iterations" / "iter_00" / "feasibility_report.json").exists()
+    assert (run_dir / "iterations" / "iter_00" / "execution_results.json").exists()
     assert (run_dir / "iterations" / "iter_00" / "analysis_update.json").exists()
 
     run_log = json.loads((run_dir / "run_log.json").read_text(encoding="utf-8"))
@@ -114,8 +119,9 @@ def test_autonomous_run_produces_model_artifacts(tmp_path):
     assert kinds[0] == "collect_system_info"
     assert "llm_research" in kinds
     assert "llm_plan" in kinds
-    assert "llm_generate_suite" in kinds
-    assert "execute_suite" in kinds
+    assert kinds.count("llm_plan") >= 1
+    assert "llm_generate_implementation" in kinds
+    assert "execute_implementation" in kinds
     assert "llm_analyze_update" in kinds
     assert kinds[-1] == "autonomous_report"
 
@@ -150,6 +156,9 @@ def test_autonomous_openai_backend_falls_back_to_heuristic(tmp_path):
     assert plan_task["status"] == "done"
     assert "fallback" in plan_task["result"]["planner"]
     assert "fallback used" in plan_task["result"]["reason"]
+    assert "knowledge_model" in plan_task["result"]
+    assert "proposal" in plan_task["result"]
+    assert "research_request_artifact" in plan_task["result"]
 
 
 def test_workload_skip_detection(tmp_path):
