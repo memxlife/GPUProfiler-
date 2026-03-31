@@ -2,3 +2,7 @@ __pycache__/
 .pytest_cache/
 profiling_runs/
 *.pyc
+bench_out/
+gb10_bench/
+gb10_*.csv
+set_key.sh
