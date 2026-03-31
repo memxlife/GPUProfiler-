@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from gpu_profiler.agents import Agent, WorkloadRunnerAgent
+from gpu_profiler.llm import HeuristicWorkflowBackend, OpenAIWorkflowBackend, ResilientWorkflowBackend
 from gpu_profiler.models import AgentContext, RetryPolicy, Task
 from gpu_profiler.orchestrator import Orchestrator
 
@@ -161,6 +162,65 @@ def test_autonomous_openai_backend_falls_back_to_heuristic(tmp_path):
     assert "knowledge_model" in plan_task["result"]
     assert "proposal" in plan_task["result"]
     assert "research_request_artifact" in plan_task["result"]
+
+
+def test_resilient_workflow_falls_back_when_openai_plan_times_out():
+    backend = OpenAIWorkflowBackend(model="gpt-5.4", request_timeout_sec=1.0)
+
+    def _timeout(*_args, **_kwargs):
+        raise TimeoutError("OpenAI completion timed out")
+
+    backend._json_completion = _timeout  # type: ignore[method-assign]
+    resilient = ResilientWorkflowBackend(primary=backend, fallback=HeuristicWorkflowBackend())
+
+    result = resilient.propose_plan(
+        intent="Develop a performance model for the local GPU",
+        kb={},
+        iteration=0,
+        max_iterations=1,
+        max_benchmarks=1,
+    )
+
+    assert "fallback used" in result.reason
+    assert "timed out" in result.reason
+    assert "fallback" in result.planner
+    assert isinstance(result.knowledge_model, dict)
+    assert isinstance(result.proposal, dict)
+
+
+class SlowPrimaryBackend(HeuristicWorkflowBackend):
+    name = "slow-primary"
+    request_timeout_sec = 0.2
+
+    def propose_plan(
+        self,
+        intent: str,
+        kb: dict,
+        iteration: int,
+        max_iterations: int,
+        max_benchmarks: int,
+    ):
+        time.sleep(20)
+        return super().propose_plan(intent, kb, iteration, max_iterations, max_benchmarks)
+
+
+def test_resilient_workflow_terminates_hung_primary_backend():
+    resilient = ResilientWorkflowBackend(primary=SlowPrimaryBackend(), fallback=HeuristicWorkflowBackend())
+
+    start = time.time()
+    result = resilient.propose_plan(
+        intent="Develop a performance model for the local GPU",
+        kb={},
+        iteration=0,
+        max_iterations=1,
+        max_benchmarks=1,
+    )
+    elapsed = time.time() - start
+
+    assert elapsed < 5.0
+    assert "fallback used" in result.reason
+    assert "timed out" in result.reason
+    assert "fallback" in result.planner
 
 
 def test_workload_skip_detection(tmp_path):

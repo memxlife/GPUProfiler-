@@ -1,6 +1,8 @@
 import json
+import multiprocessing
 import os
 import re
+import signal
 from dataclasses import dataclass
 from typing import Any
 
@@ -344,8 +346,9 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
 
 
 class OpenAIWorkflowBackend(LLMWorkflowBackend):
-    def __init__(self, model: str = "gpt-5.4") -> None:
+    def __init__(self, model: str = "gpt-5.4", request_timeout_sec: float = 15.0) -> None:
         self.model = model
+        self.request_timeout_sec = max(1.0, float(request_timeout_sec))
         self.name = f"openai:{self.model}"
 
     def negotiate_schema(
@@ -730,7 +733,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             raise RuntimeError("OpenAI workflow backend requires `openai` package.") from exc
 
         api_key = _normalized_api_key()
-        client = OpenAI(api_key=api_key or None, timeout=45.0)
+        client = OpenAI(api_key=api_key or None, timeout=self.request_timeout_sec)
         request: dict[str, Any] = {
             "model": self.model,
             "max_output_tokens": 2600,
@@ -745,7 +748,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         parse_error: Exception | None = None
         raw_text = ""
         for _ in range(2):
-            resp = client.responses.create(**request)
+            resp = self._responses_create(client, request, context="completion")
             raw_text = (resp.output_text or "").strip()
             try:
                 return _parse_json_object(raw_text)
@@ -759,29 +762,57 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         raise ValueError(f"Failed to parse JSON response: {parse_error}; text_prefix={raw_text[:180]}")
 
     def _repair_json(self, client: Any, malformed: str, schema_hint: dict[str, Any]) -> str:
-        repair = client.responses.create(
-            model=self.model,
-            max_output_tokens=1400,
-            input=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Repair malformed JSON. Return only a valid JSON object. "
-                        "No markdown, no explanation, no extra text."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "malformed_output": malformed,
-                            "required_shape_hint": schema_hint.get("output_schema", {}),
-                        }
-                    ),
-                },
-            ],
+        repair = self._responses_create(
+            client,
+            {
+                "model": self.model,
+                "max_output_tokens": 1400,
+                "input": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Repair malformed JSON. Return only a valid JSON object. "
+                            "No markdown, no explanation, no extra text."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "malformed_output": malformed,
+                                "required_shape_hint": schema_hint.get("output_schema", {}),
+                            }
+                        ),
+                    },
+                ],
+            },
+            context="json-repair",
         )
         return (repair.output_text or "").strip()
+
+    def _responses_create(self, client: Any, request: dict[str, Any], context: str) -> Any:
+        return self._run_with_timeout(
+            lambda: client.responses.create(**request),
+            timeout_sec=self.request_timeout_sec + 5.0,
+            context=context,
+        )
+
+    def _run_with_timeout(self, fn: Any, timeout_sec: float, context: str) -> Any:
+        timeout_sec = max(1.0, float(timeout_sec))
+        if not hasattr(signal, "SIGALRM"):
+            return fn()
+
+        def _handle_timeout(_signum: int, _frame: Any) -> None:
+            raise TimeoutError(f"OpenAI {context} timed out after {timeout_sec:.1f}s")
+
+        previous_handler = signal.getsignal(signal.SIGALRM)
+        signal.signal(signal.SIGALRM, _handle_timeout)
+        previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout_sec)
+        try:
+            return fn()
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+            signal.signal(signal.SIGALRM, previous_handler)
 
 
 class ResilientWorkflowBackend(LLMWorkflowBackend):
@@ -797,7 +828,7 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
         max_iterations: int,
     ) -> ContractDecision:
         try:
-            return self.primary.negotiate_schema(intent, kb, iteration, max_iterations)
+            return self._call_primary("negotiate_schema", intent, kb, iteration, max_iterations)
         except Exception as exc:  # noqa: BLE001
             alt = self.fallback.negotiate_schema(intent, kb, iteration, max_iterations)
             alt.reason = f"Primary schema negotiation failed ({exc}); fallback used. {alt.reason}"
@@ -813,7 +844,7 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
         max_benchmarks: int,
     ) -> PlanDecision:
         try:
-            return self.primary.propose_plan(intent, kb, iteration, max_iterations, max_benchmarks)
+            return self._call_primary("propose_plan", intent, kb, iteration, max_iterations, max_benchmarks)
         except Exception as exc:  # noqa: BLE001
             alt = self.fallback.propose_plan(intent, kb, iteration, max_iterations, max_benchmarks)
             alt.reason = f"Primary planning failed ({exc}); fallback used. {alt.reason}"
@@ -829,7 +860,7 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
         max_sources: int = 8,
     ) -> ResearchDecision:
         try:
-            return self.primary.research_context(intent, kb, iteration, research_request, max_sources)
+            return self._call_primary("research_context", intent, kb, iteration, research_request, max_sources)
         except Exception as exc:  # noqa: BLE001
             alt = self.fallback.research_context(intent, kb, iteration, research_request, max_sources)
             alt.reason = f"Primary research failed ({exc}); fallback used. {alt.reason}"
@@ -845,7 +876,7 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
         max_benchmarks: int,
     ) -> ImplementationDecision:
         try:
-            return self.primary.generate_implementation(intent, kb, plan, iteration, max_benchmarks)
+            return self._call_primary("generate_implementation", intent, kb, plan, iteration, max_benchmarks)
         except Exception as exc:  # noqa: BLE001
             alt = self.fallback.generate_implementation(intent, kb, plan, iteration, max_benchmarks)
             alt.reason = f"Primary implementation generation failed ({exc}); fallback used. {alt.reason}"
@@ -862,12 +893,65 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
         max_iterations: int,
     ) -> AnalysisDecision:
         try:
-            return self.primary.analyze_results(intent, kb, plan, execution_results, iteration, max_iterations)
+            return self._call_primary(
+                "analyze_results",
+                intent,
+                kb,
+                plan,
+                execution_results,
+                iteration,
+                max_iterations,
+            )
         except Exception as exc:  # noqa: BLE001
             alt = self.fallback.analyze_results(intent, kb, plan, execution_results, iteration, max_iterations)
             alt.reason = f"Primary analysis failed ({exc}); fallback used. {alt.reason}"
             alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
             return alt
+
+    def _call_primary(self, method_name: str, *args: Any) -> Any:
+        timeout_sec = self._primary_timeout_sec()
+        if timeout_sec <= 0:
+            return getattr(self.primary, method_name)(*args)
+
+        ctx = multiprocessing.get_context("fork") if "fork" in multiprocessing.get_all_start_methods() else multiprocessing.get_context()
+        queue: Any = ctx.Queue()
+        proc = ctx.Process(target=_invoke_backend_method, args=(self.primary, method_name, args, queue))
+        proc.start()
+        proc.join(timeout_sec)
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(5.0)
+            raise TimeoutError(
+                f"Primary backend {getattr(self.primary, 'name', 'primary')}:{method_name} timed out after {timeout_sec:.1f}s"
+            )
+        if not queue.empty():
+            status, payload = queue.get()
+            if status == "ok":
+                return payload
+            raise RuntimeError(str(payload))
+        if proc.exitcode not in {0, None}:
+            raise RuntimeError(
+                f"Primary backend {getattr(self.primary, 'name', 'primary')}:{method_name} exited with code {proc.exitcode}"
+            )
+        raise RuntimeError(f"Primary backend {getattr(self.primary, 'name', 'primary')}:{method_name} returned no result")
+
+    def _primary_timeout_sec(self) -> float:
+        raw = getattr(self.primary, "request_timeout_sec", 0.0)
+        try:
+            timeout_sec = float(raw)
+        except Exception:
+            return 0.0
+        if timeout_sec <= 0:
+            return 0.0
+        return max(2.0, timeout_sec + 2.0)
+
+
+def _invoke_backend_method(backend: Any, method_name: str, args: tuple[Any, ...], queue: Any) -> None:
+    try:
+        result = getattr(backend, method_name)(*args)
+        queue.put(("ok", result))
+    except Exception as exc:  # noqa: BLE001
+        queue.put(("err", f"{exc.__class__.__name__}: {exc}"))
 
 
 def _normalized_api_key() -> str:
