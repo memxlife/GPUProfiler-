@@ -1,6 +1,6 @@
 # Agent API Specification
 
-Version: 0.1
+Version: 0.2
 Status: Draft Agent API Contract
 Last Updated: 2026-03-31
 
@@ -78,20 +78,28 @@ Budget terminology:
 - response target: preferred output size for the model response
 - timeout target: expected wall-clock budget for the call
 
-## 3. Planner API
+## 3. Planner APIs
+
+Planner is split into two APIs:
+
+1. research-request planning
+2. proposal planning
+
+The planner reads the current `knowledge_model.json` but does not emit a full replacement knowledge model.
 
 ### 3.1 Agent Name
 
 - `planner`
 
-### 3.2 Purpose
+### 3.2 Planner Research API
+
+#### 3.2.1 Purpose
 
 - read current intent and knowledge state
-- maintain domain knowledge hierarchy
-- produce next non-executable proposal
+- identify knowledge gaps that require external research
 - emit `research_request.json` when external search is needed
 
-### 3.3 Invocation Inputs
+#### 3.2.2 Invocation Inputs
 
 Required:
 
@@ -99,7 +107,7 @@ Required:
 {
   "intent": "string",
   "iteration": "int",
-  "knowledge_base_artifact": "string|null"
+  "knowledge_model_artifact": "string"
 }
 ```
 
@@ -107,31 +115,21 @@ Optional:
 
 ```json
 {
-  "prior_knowledge_model_artifact": "string|null",
-  "prior_proposal_artifact": "string|null",
   "prior_analysis_artifact": "string|null",
-  "research_artifact": "string|null",
   "system_info_artifact": "string|null",
   "constraints": {
-    "max_proposals": "int|null",
-    "curriculum_stage_limit": "string|null"
+    "max_questions": "int|null"
   }
 }
 ```
 
-### 3.4 Produced Artifacts
-
-Required:
-
-- `knowledge_model.json`
-- `proposal.json`
-- `proposal.md`
+#### 3.2.3 Produced Artifacts
 
 Optional:
 
 - `research_request.json`
 
-### 3.5 Result Object
+#### 3.2.4 Result Object
 
 ```json
 {
@@ -140,43 +138,125 @@ Optional:
   "status": "succeeded|failed|partial",
   "reason": "string",
   "artifacts": {
-    "knowledge_model": "string",
-    "proposal_json": "string",
-    "proposal_md": "string",
     "research_request": "string|null"
   },
   "summary": {
-    "focus_nodes": ["string"],
-    "proposal_count": "int",
-    "research_requested": "bool"
+    "research_requested": "bool",
+    "target_question_count": "int"
   },
   "error": null
 }
 ```
 
-### 3.6 Downstream Consumers
+#### 3.2.5 Downstream Consumers
 
 - search consumes `research_request.json`
-- codegen consumes `proposal.json`
-- analyzer may read `knowledge_model.json` and `proposal.json`
 - flow controller consumes planner result object
 
-### 3.7 Invariants
+#### 3.2.6 Invariants
 
 - must not emit executable code
 - must not emit run commands
-- must produce `knowledge_model.json` and `proposal.json` on success
-- `research_request.json` only when search is needed
+- must emit `research_request.json` only when search is needed
+- must reason from the current `knowledge_model.json`, not regenerate it wholesale
+
+#### 3.2.7 Budget
+
+- input target: `<= 4 KB`
+- input hard cap: `<= 6 KB`
+- response target: `<= 1.5 KB`
+- timeout target: `8-12s`
+
+Preferred planner-research input slice:
+
+- intent summary
+- iteration index
+- current knowledge gaps only
+- latest analyzer gap summary only
+- compact planning constraints
+
+### 3.3 Planner Proposal API
+
+#### 3.3.1 Purpose
+
+- read current intent, current knowledge model, returned research, and analysis gaps
+- produce the next non-executable proposal
+
+#### 3.3.2 Invocation Inputs
+
+Required:
+
+```json
+{
+  "intent": "string",
+  "iteration": "int",
+  "knowledge_model_artifact": "string"
+}
+```
+
+Optional:
+
+```json
+{
+  "research_artifact": "string|null",
+  "prior_analysis_artifact": "string|null",
+  "system_info_artifact": "string|null",
+  "constraints": {
+    "max_proposals": "int|null",
+    "curriculum_stage_limit": "string|null"
+  }
+}
+```
+
+#### 3.3.3 Produced Artifacts
+
+Required:
+
+- `proposal.json`
+- `proposal.md`
+
+#### 3.3.4 Result Object
+
+```json
+{
+  "agent": "planner",
+  "iteration": "int",
+  "status": "succeeded|failed|partial",
+  "reason": "string",
+  "artifacts": {
+    "proposal_json": "string",
+    "proposal_md": "string"
+  },
+  "summary": {
+    "target_nodes": ["string"],
+    "proposal_count": "int"
+  },
+  "error": null
+}
+```
+
+#### 3.3.5 Downstream Consumers
+
+- codegen consumes `proposal.json`
+- analyzer may read `proposal.json`
+- flow controller consumes planner result object
+
+#### 3.3.6 Invariants
+
+- must not emit executable code
+- must not emit run commands
+- must produce `proposal.json` on success
+- must reason from the current `knowledge_model.json`, not regenerate it wholesale
 - planner output content is domain-specific, but schema is generic
 
-### 3.8 Budget
+#### 3.3.7 Budget
 
 - input target: `<= 6 KB`
 - input hard cap: `<= 10 KB`
 - response target: `<= 2 KB`
 - timeout target: `10-15s`
 
-Preferred planner input slice:
+Preferred planner-proposal input slice:
 
 - intent summary
 - iteration index
@@ -335,7 +415,7 @@ Required:
 
 Optional:
 
-- generated source/build helper files such as `.cu`, `.json`, `.md`
+- generated source or build helper files such as `.cu`, `.json`, `.md`
 
 ### 5.5 Result Object
 
@@ -440,7 +520,7 @@ Required:
 Optional or preserved:
 
 - build logs
-- stdout/stderr logs
+- stdout or stderr logs
 - profiler outputs
 - trace files
 - metric snapshots
@@ -506,6 +586,7 @@ Avoid:
 - produce claims with provenance
 - update knowledge state
 - provide planner-facing gap and revision feedback
+- update the persistent knowledge model incrementally
 
 ### 7.3 Invocation Inputs
 
@@ -542,6 +623,7 @@ Required:
 Optional:
 
 - updated knowledge-base artifact
+- updated `knowledge_model.json`
 - supporting analysis artifacts
 
 ### 7.5 Result Object
@@ -555,7 +637,8 @@ Optional:
   "artifacts": {
     "analysis_update": "string",
     "analysis_md": "string",
-    "knowledge_base": "string|null"
+    "knowledge_base": "string|null",
+    "knowledge_model": "string|null"
   },
   "summary": {
     "claim_count": "int",
@@ -571,7 +654,7 @@ Optional:
 
 - planner consumes analyzer feedback
 - flow controller consumes analyzer result object
-- knowledge base is updated from analyzer outputs
+- knowledge base and knowledge model are updated from analyzer outputs
 
 ### 7.7 Invariants
 
@@ -580,6 +663,7 @@ Optional:
 - must preserve provenance for claims and KB updates
 - must distinguish supported vs unresolved vs contradictory knowledge
 - must produce planner-facing feedback in `analysis_update.json`
+- must update the knowledge model incrementally rather than replacing it wholesale
 
 ### 7.8 Budget
 
@@ -634,6 +718,7 @@ Optional:
 ```json
 {
   "knowledge_base_artifact": "string|null",
+  "knowledge_model_artifact": "string|null",
   "system_info_artifact": "string|null",
   "target_coverage": "float|null"
 }
@@ -660,7 +745,8 @@ Optional:
   "artifacts": {
     "run_log": "string",
     "run_summary": "string|null",
-    "knowledge_base": "string|null"
+    "knowledge_base": "string|null",
+    "knowledge_model": "string|null"
   },
   "summary": {
     "iterations_completed": "int",
@@ -686,6 +772,7 @@ Optional:
 - must enforce iteration and retry bounds
 - must invoke agents according to artifact dependencies
 - must make stopping decisions only from explicit policies and agent outputs
+- must preserve the incremental knowledge-model update pattern
 
 ### 8.8 Budget
 
