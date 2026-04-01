@@ -66,14 +66,13 @@ Default autonomous modeling dimensions are fine-grained and include compute and 
 (SM throughput, occupancy, instruction mix, L1/L2 behavior, global memory bandwidth/latency, interconnect transfer, shared memory, and thermal/power stability).
 
 Autonomous loop structure:
-1. LLM schema-contract agent negotiates shared JSON structure for planner/codegen/analysis outputs.
-2. LLM planner reads the knowledge base, selects the next frontier question, and decides whether optional external research is needed.
-3. LLM search agent performs frontier-directed research when requested and returns sourced research artifacts.
-4. LLM planner prepares internal benchmark-planning state from the current question, knowledge base, and optional research results.
-5. LLM code generator creates concrete benchmark implementation artifacts from the current question plus KB context.
-6. Benchmark executor runs the generated implementation and collects artifacts.
-7. LLM analysis agent extracts claims, updates knowledge base, and decides whether to continue.
-8. Repeat until planner/analysis stops or max iteration count is reached.
+1. LLM planner reads the knowledge base, selects the next frontier question, and decides whether optional external research is needed.
+2. LLM search agent performs frontier-directed research when requested and returns sourced research artifacts.
+3. LLM planner prepares internal benchmark-planning state from the current question, knowledge base, and optional research results.
+4. LLM code generator creates concrete benchmark implementation artifacts from the current question plus KB context.
+5. Benchmark executor runs the generated implementation and collects artifacts.
+6. LLM analysis agent extracts claims, updates knowledge base, and decides whether to continue.
+7. Repeat until planner/analysis stops or max iteration count is reached.
 
 The autonomous knowledge base records local tool availability (`ncu`, `nsys`, etc.) and the LLM code generator prefers those tools when present.
 

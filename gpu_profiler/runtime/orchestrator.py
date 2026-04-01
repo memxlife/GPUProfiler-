@@ -934,8 +934,6 @@ class Orchestrator:
         return sections
 
     def _artifact_keys_for_task(self, task_kind: str) -> list[tuple[str, str]]:
-        if task_kind == "llm_schema_contract":
-            return [("schema-contract", "artifact_md"), ("schema-contract-json", "artifact")]
         if task_kind == "llm_plan_research":
             return [("research-request-raw", "research_request_raw_artifact")]
         if task_kind == "llm_research":

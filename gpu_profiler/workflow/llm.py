@@ -87,13 +87,6 @@ class AnalysisDecision:
 
 
 @dataclass
-class ContractDecision:
-    schema_contract: dict[str, Any]
-    reason: str
-    planner: str
-
-
-@dataclass
 class ResearchDecision:
     reason: str
     request_summary: str
@@ -105,15 +98,6 @@ class ResearchDecision:
 
 
 class LLMWorkflowBackend:
-    def negotiate_schema(
-        self,
-        intent: str,
-        kb: dict[str, Any],
-        iteration: int,
-        max_iterations: int,
-    ) -> ContractDecision:
-        raise NotImplementedError
-
     def research_context(
         self,
         intent: str,
@@ -187,74 +171,6 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
     """
 
     name = "heuristic-workflow-v2"
-
-    def negotiate_schema(
-        self,
-        intent: str,
-        kb: dict[str, Any],
-        iteration: int,
-        max_iterations: int,
-    ) -> ContractDecision:
-        _ = (intent, kb, iteration, max_iterations)
-        return ContractDecision(
-            schema_contract={
-                "version": "1.0",
-                "negotiation_policy": {
-                    "goals": {
-                        "planner": "maximize_coverage",
-                        "codegen": "maximize_implementability",
-                        "analyzer": "maximize_observability",
-                    },
-                    "score_fields": [
-                        "coverage_gain_score",
-                        "implementability_score",
-                        "observability_score",
-                    ],
-                    "thresholds": {
-                        "coverage_gain_min": 0.45,
-                        "implementability_min": 0.55,
-                        "observability_min": 0.5,
-                        "utility_min": 0.55,
-                    },
-                    "weights": {
-                        "coverage_gain_score": 0.4,
-                        "implementability_score": 0.3,
-                        "observability_score": 0.3,
-                    },
-                    "max_amendment_rounds": 2,
-                    "amendment_policy": "Reject below-threshold benchmark plans, keep rationale, and request revised implementation.",
-                },
-                "research_request_output": {
-                    "required_keys": ["reason", "research_request"],
-                },
-                "benchmark_plan_output": {
-                    "required_keys": ["reason", "benchmark_plan"],
-                },
-                "implementation_output": {
-                    "required_keys": ["reason", "benchmarks"],
-                    "benchmark_required_keys": [
-                        "id",
-                        "command",
-                        "hypothesis",
-                        "dimensions",
-                        "scores",
-                    ],
-                },
-                "analysis_output": {
-                    "required_keys": [
-                        "summary",
-                        "claims",
-                        "covered_dimensions",
-                        "stop",
-                        "reason",
-                        "veto_next_plan",
-                        "veto_reason",
-                    ],
-                },
-            },
-            reason="Fallback schema contract with generic required keys.",
-            planner=self.name,
-        )
 
     def research_context(
         self,
@@ -455,69 +371,6 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         self.model = model
         self.request_timeout_sec = max(1.0, float(request_timeout_sec))
         self.name = f"openai:{self.model}"
-
-    def negotiate_schema(
-        self,
-        intent: str,
-        kb: dict[str, Any],
-        iteration: int,
-        max_iterations: int,
-    ) -> ContractDecision:
-        payload = {
-            "intent": intent,
-            "knowledge_base": kb,
-            "iteration": iteration,
-            "max_iterations": max_iterations,
-            "task": (
-                "Planner agent, code-generation agent, and analysis agent collaboratively define "
-                "a shared JSON contract for this iteration."
-            ),
-            "output_schema": {
-                "reason": "str",
-                "schema_contract": {
-                    "version": "str",
-                    "negotiation_policy": {
-                        "score_fields": ["str"],
-                        "thresholds": {
-                            "coverage_gain_min": "float(0..1)",
-                            "implementability_min": "float(0..1)",
-                            "observability_min": "float(0..1)",
-                            "utility_min": "float(0..1)",
-                        },
-                        "weights": {
-                            "coverage_gain_score": "float(0..1)",
-                            "implementability_score": "float(0..1)",
-                            "observability_score": "float(0..1)",
-                        },
-                        "max_amendment_rounds": "int>=0",
-                        "amendment_policy": "str",
-                    },
-                    "research_request_output": {"required_keys": ["str"]},
-                    "benchmark_plan_output": {"required_keys": ["str"]},
-                    "implementation_output": {"required_keys": ["str"], "benchmark_required_keys": ["str"]},
-                    "analysis_output": {"required_keys": ["str"]},
-                },
-            },
-        }
-        out = self._json_completion(
-            system=(
-                "You are three collaborating agents: planner, code-generator, analyzer. "
-                "Negotiate and return one strict JSON contract all agents must follow. "
-                "Return strict JSON only."
-            ),
-            user=payload,
-            context="schema-contract",
-            timeout_sec=PLANNER_REQUEST_TIMEOUT_SEC,
-        )
-        contract = out.get("schema_contract", {})
-        if not isinstance(contract, dict):
-            contract = {}
-        contract = _merge_schema_contract(contract)
-        return ContractDecision(
-            schema_contract=contract,
-            reason=str(out.get("reason", "")),
-            planner=self.name,
-        )
 
     def research_context(
         self,
@@ -1087,21 +940,6 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
             self.analysis_timeout_retries = 1
         self.timeout_diagnostics_enabled = os.getenv("GPU_PROFILER_TIMEOUT_DIAGNOSTICS", "1") != "0"
 
-    def negotiate_schema(
-        self,
-        intent: str,
-        kb: dict[str, Any],
-        iteration: int,
-        max_iterations: int,
-    ) -> ContractDecision:
-        try:
-            return self._call_primary("negotiate_schema", intent, kb, iteration, max_iterations)
-        except Exception as exc:  # noqa: BLE001
-            alt = self.fallback.negotiate_schema(intent, kb, iteration, max_iterations)
-            alt.reason = f"Primary schema negotiation failed ({exc}); fallback used. {alt.reason}"
-            alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
-            return alt
-
     def propose_plan(
         self,
         intent: str,
@@ -1559,7 +1397,6 @@ def _json_safe(value: Any) -> Any:
 
 def _method_timeout_context(method_name: str) -> str:
     mapping = {
-        "negotiate_schema": "schema-contract",
         "plan_research_request": "plan-research-request",
         "plan_benchmark": "planner-benchmark",
         "research_context": "research-context",
@@ -2890,37 +2727,6 @@ def _policy_from_contract(contract: dict[str, Any]) -> dict[str, Any]:
         merged["max_amendment_rounds"] = max(0, int(merged.get("max_amendment_rounds", 2)))
     except Exception:
         merged["max_amendment_rounds"] = 2
-    return merged
-
-
-def _merge_schema_contract(contract: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(contract, dict):
-        contract = {}
-    legacy_planner = contract.get("planner_output", {}) if isinstance(contract.get("planner_output", {}), dict) else {}
-    merged = {
-        "version": str(contract.get("version", "1.0")),
-        "negotiation_policy": _policy_from_contract(contract),
-        "research_request_output": contract.get("research_request_output", {}),
-        "benchmark_plan_output": contract.get("benchmark_plan_output", contract.get("proposal_output", {})),
-        "implementation_output": contract.get("implementation_output", {}),
-        "analysis_output": contract.get("analysis_output", {}),
-    }
-    if not isinstance(merged["research_request_output"], dict):
-        merged["research_request_output"] = {}
-    if not isinstance(merged["benchmark_plan_output"], dict):
-        merged["benchmark_plan_output"] = {}
-    if legacy_planner:
-        merged["benchmark_plan_output"] = {
-            **legacy_planner,
-            **merged["benchmark_plan_output"],
-        }
-    if not merged["research_request_output"]:
-        merged["research_request_output"] = {"required_keys": ["reason", "research_request"]}
-    if not merged["benchmark_plan_output"]:
-        merged["benchmark_plan_output"] = {"required_keys": ["reason", "benchmark_plan"]}
-    for key in ["implementation_output", "analysis_output"]:
-        if not isinstance(merged[key], dict):
-            merged[key] = {}
     return merged
 
 

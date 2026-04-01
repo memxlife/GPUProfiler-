@@ -169,44 +169,6 @@ class LLMPlanningAgent(Agent):
         return plan
 
 
-class LLMSchemaContractAgent(Agent):
-    name = "llm-schema-contract"
-
-    def __init__(self, workflow_backend: LLMWorkflowBackend | None = None):
-        self.workflow_backend = workflow_backend or HeuristicWorkflowBackend()
-
-    def can_handle(self, task: Task) -> bool:
-        return task.kind == "llm_schema_contract"
-
-    def run(self, task: Task, ctx: AgentContext) -> dict[str, Any]:
-        intent = str(task.payload.get("intent", "")).strip()
-        iteration = int(task.payload.get("iteration", 0))
-        max_iterations = int(task.payload.get("max_iterations", 4))
-        kb = task.payload.get("knowledge_base", {})
-
-        decision = self.workflow_backend.negotiate_schema(
-            intent=intent,
-            kb=kb,
-            iteration=iteration,
-            max_iterations=max_iterations,
-        )
-        result = {
-            "iteration": iteration,
-            "planner": decision.planner,
-            "reason": decision.reason,
-            "schema_contract": decision.schema_contract,
-        }
-        iter_dir = _iteration_dir(ctx.run_dir, iteration)
-        iter_dir.mkdir(parents=True, exist_ok=True)
-        json_path = iter_dir / "schema_contract.json"
-        md_path = iter_dir / "schema_contract.md"
-        write_json(json_path, result)
-        write_text(md_path, _render_schema_contract_md(result))
-        result["artifact"] = str(json_path)
-        result["artifact_md"] = str(md_path)
-        return result
-
-
 class LLMResearchAgent(Agent):
     name = "llm-research"
 
@@ -972,7 +934,6 @@ def default_agents(workflow_backend: LLMWorkflowBackend | None = None) -> list[A
     return [
         CommunicationMonitorAgent(),
         PlannerAgent(),
-        LLMSchemaContractAgent(workflow_backend=backend),
         LLMResearchAgent(workflow_backend=backend),
         LLMPlanningAgent(workflow_backend=backend),
         LLMCodegenAgent(workflow_backend=backend),
@@ -1629,21 +1590,6 @@ def _render_analysis_md(analysis: dict[str, Any]) -> str:
             lines.append(
                 f"- path: `{item.get('path')}` | change: {item.get('change')} | priority: `{item.get('priority')}`"
             )
-    return "\n".join(lines)
-
-
-def _render_schema_contract_md(contract: dict[str, Any]) -> str:
-    lines = [
-        f"# Iteration {contract.get('iteration')} Schema Contract",
-        "",
-        f"- planner: `{contract.get('planner')}`",
-        f"- reason: {contract.get('reason')}",
-        "",
-        "## Contract",
-        "```json",
-        json.dumps(contract.get("schema_contract", {}), indent=2),
-        "```",
-    ]
     return "\n".join(lines)
 
 
