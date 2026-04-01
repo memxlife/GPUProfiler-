@@ -76,20 +76,24 @@ def load_markdown_knowledge_base_memos(kb: dict[str, Any]) -> dict[str, str]:
         str(kb.get("knowledge_base_modeling_artifact", "")).strip(),
     ]
     chapter_texts = [_read_text(path) for path in chapter_paths if path]
-    frontier_questions = extract_frontier_questions(kb)
+    frontier_candidates = extract_frontier_candidates(kb)
+    frontier_questions = [str(item.get("question", "")).strip() for item in frontier_candidates if str(item.get("question", "")).strip()]
     return {
         "knowledge_base_book_memo": "\n\n".join(part for part in [_read_text(index_path), *chapter_texts] if part),
         "knowledge_base_frontier_memo": _read_text(frontier_path),
         "knowledge_base_frontier_questions": frontier_questions,
+        "knowledge_base_frontier_candidates": frontier_candidates,
     }
 
 
 def extract_frontier_questions(kb: dict[str, Any]) -> list[str]:
-    questions: list[str] = []
+    return [str(item.get("question", "")).strip() for item in extract_frontier_candidates(kb) if str(item.get("question", "")).strip()]
+
+
+def extract_frontier_candidates(kb: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
     frontier_path = str(kb.get("knowledge_base_frontier_artifact", "")).strip()
-    for item in _parse_frontier_markdown(_read_text(frontier_path)):
-        if item not in questions:
-            questions.append(item)
+    candidates.extend(_parse_frontier_markdown(_read_text(frontier_path)))
     for artifact_key in (
         "knowledge_base_foundations_artifact",
         "knowledge_base_memory_artifact",
@@ -99,10 +103,18 @@ def extract_frontier_questions(kb: dict[str, Any]) -> list[str]:
         path_text = str(kb.get(artifact_key, "")).strip()
         if not path_text:
             continue
-        for item in _parse_open_questions_from_chapter(_read_text(path_text)):
-            if item not in questions:
-                questions.append(item)
-    return questions[:16]
+        candidates.extend(_parse_open_questions_from_chapter(_read_text(path_text)))
+    deduped: dict[str, dict[str, Any]] = {}
+    for item in candidates:
+        question = str(item.get("question", "")).strip()
+        if not question:
+            continue
+        score = _candidate_sort_key(item)
+        existing = deduped.get(question)
+        if existing is None or score < _candidate_sort_key(existing):
+            deduped[question] = item
+    ordered = sorted(deduped.values(), key=_candidate_sort_key)
+    return ordered[:16]
 
 
 def _write_if_missing(path: Path, text: str) -> None:
@@ -266,9 +278,10 @@ def _frontier_questions(kb: dict[str, Any], knowledge_model: dict[str, Any], ana
     return questions[:12]
 
 
-def _parse_frontier_markdown(text: str) -> list[str]:
-    questions: list[str] = []
+def _parse_frontier_markdown(text: str) -> list[dict[str, Any]]:
+    questions: list[dict[str, Any]] = []
     in_frontier = False
+    current_index = -1
     for raw_line in str(text or "").splitlines():
         line = raw_line.strip()
         if line == "## Active Frontier Questions":
@@ -279,20 +292,41 @@ def _parse_frontier_markdown(text: str) -> list[str]:
         if not in_frontier:
             continue
         if line and line[0].isdigit() and ". " in line:
-            questions.append(line.split(". ", 1)[1].strip())
+            current_index += 1
+            question_text = line.split(". ", 1)[1].strip()
+            questions.append(
+                {
+                    "question": question_text,
+                    "source": "frontier",
+                    "section_refs": [],
+                    "frontier_rank": current_index,
+                    "section_order": (999, 999),
+                }
+            )
+            continue
+        if current_index >= 0 and line.startswith("- [") and "]" in line:
+            ref = line[2:].strip()
+            questions[current_index]["section_refs"].append(ref)
+            section_order = _section_order_from_reference(ref)
+            if section_order is not None and questions[current_index].get("section_order") == (999, 999):
+                questions[current_index]["section_order"] = section_order
     return questions
 
 
-def _parse_open_questions_from_chapter(text: str) -> list[str]:
-    questions: list[str] = []
+def _parse_open_questions_from_chapter(text: str) -> list[dict[str, Any]]:
+    questions: list[dict[str, Any]] = []
     current_section = ""
+    current_order: tuple[int, int] = (999, 999)
     in_open_questions = False
+    local_rank = 0
     for raw_line in str(text or "").splitlines():
         line = raw_line.rstrip()
         stripped = line.strip()
         if stripped.startswith("#### "):
             current_section = stripped[5:].strip()
+            current_order = _section_order_from_heading(current_section)
             in_open_questions = False
+            local_rank = 0
             continue
         if stripped == "Open Questions":
             in_open_questions = True
@@ -304,8 +338,49 @@ def _parse_open_questions_from_chapter(text: str) -> list[str]:
         if stripped.startswith("- "):
             question = stripped[2:].strip()
             if question:
-                questions.append(f"{current_section}: {question}" if current_section else question)
+                questions.append(
+                    {
+                        "question": f"{current_section}: {question}" if current_section else question,
+                        "source": "chapter",
+                        "section_refs": [current_section] if current_section else [],
+                        "frontier_rank": local_rank,
+                        "section_order": current_order,
+                    }
+                )
+                local_rank += 1
     return questions
+
+
+def _section_order_from_heading(heading: str) -> tuple[int, int]:
+    text = str(heading or "").strip()
+    token = text.split(" ", 1)[0]
+    if "." not in token:
+        return (999, 999)
+    parts = token.split(".")
+    if len(parts) < 2:
+        return (999, 999)
+    try:
+        return (int(parts[0]), int(parts[1]))
+    except Exception:
+        return (999, 999)
+
+
+def _section_order_from_reference(reference: str) -> tuple[int, int] | None:
+    text = str(reference or "").strip()
+    if text.startswith("[") and "]" in text:
+        text = text[1:text.index("]")]
+    order = _section_order_from_heading(text)
+    return None if order == (999, 999) else order
+
+
+def _candidate_sort_key(item: dict[str, Any]) -> tuple[int, int, int, int]:
+    source = str(item.get("source", "")).strip()
+    source_priority = 0 if source == "chapter" else 1
+    section_order = item.get("section_order", (999, 999))
+    if not isinstance(section_order, tuple) or len(section_order) != 2:
+        section_order = (999, 999)
+    frontier_rank = int(item.get("frontier_rank", 999))
+    return (section_order[0], section_order[1], source_priority, frontier_rank)
 
 
 def _initial_findings_md() -> str:

@@ -1762,6 +1762,17 @@ def _compact_planner_kb(
         for item in (kb.get("knowledge_base_frontier_questions", []) if isinstance(kb.get("knowledge_base_frontier_questions", []), list) else [])
         if str(item).strip()
     ][:8]
+    frontier_candidates = []
+    for item in (kb.get("knowledge_base_frontier_candidates", []) if isinstance(kb.get("knowledge_base_frontier_candidates", []), list) else [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        frontier_candidates.append(
+            {
+                "question": _trim_text(item.get("question", ""), 220),
+                "source": _trim_text(item.get("source", ""), 24),
+                "section_refs": [_trim_text(ref, 80) for ref in item.get("section_refs", []) if str(ref).strip()][:3],
+            }
+        )
     return {
         "intent": _trim_text(kb.get("intent", ""), 160),
         "target_dimensions": target_dimensions,
@@ -1777,6 +1788,7 @@ def _compact_planner_kb(
         "knowledge_base_book_excerpt": knowledge_book_excerpt,
         "knowledge_base_frontier_excerpt": frontier_excerpt,
         "knowledge_base_frontier_questions": frontier_questions,
+        "knowledge_base_frontier_candidates": frontier_candidates,
     }
 
 
@@ -1819,6 +1831,14 @@ def _compact_research_request(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def _next_frontier_question(kb: dict[str, Any], focus_dimensions: list[str]) -> str:
+    explicit_candidates = kb.get("knowledge_base_frontier_candidates", [])
+    if isinstance(explicit_candidates, list):
+        for item in explicit_candidates:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("question", "")).strip()
+            if text:
+                return text
     explicit_questions = kb.get("knowledge_base_frontier_questions", [])
     if isinstance(explicit_questions, list):
         for item in explicit_questions:
@@ -1858,6 +1878,11 @@ def _render_planner_proposal_prompt(payload: dict[str, Any]) -> str:
     frontier_memo = str(kb.get("knowledge_base_frontier_excerpt", "")).strip() or "No frontier memo recorded."
     knowledge_book_excerpt = str(kb.get("knowledge_base_book_excerpt", "")).strip() or "No knowledge-base excerpt recorded."
     frontier_questions = "\n".join(f"- {item}" for item in kb.get("knowledge_base_frontier_questions", []) if str(item).strip()) or "- none recorded"
+    frontier_candidates = "\n".join(
+        f"- {item.get('question', '')} | source={item.get('source', '')} | refs={item.get('section_refs', [])}"
+        for item in kb.get("knowledge_base_frontier_candidates", [])
+        if isinstance(item, dict) and str(item.get("question", "")).strip()
+    ) or "- none recorded"
     return (
         f"Intent: {payload.get('intent', '')}\n"
         f"Iteration: {payload.get('iteration', 0)} of {payload.get('max_iterations', 1)}\n"
@@ -1867,6 +1892,7 @@ def _render_planner_proposal_prompt(payload: dict[str, Any]) -> str:
         f"Knowledge-base excerpt:\n{knowledge_book_excerpt}\n\n"
         f"Frontier memo:\n{frontier_memo}\n\n"
         f"Frontier questions:\n{frontier_questions}\n\n"
+        f"Ranked frontier candidates:\n{frontier_candidates}\n\n"
         f"Selected question:\n{question_memo}\n\n"
         f"Research memo:\n{research_memo}\n\n"
         "Task: Propose the single best next benchmark proposal memo that directly answers the selected question.\n"
