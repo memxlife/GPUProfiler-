@@ -115,6 +115,7 @@ Prerequisites:
 Frontier Criteria:
 - state what evidence would justify moving the section from frontier toward known
 - analyzer should use these criteria when deciding whether the frontier advanced
+- matching evidence may update `Quantitative Understanding` and `Local Findings` without advancing `Status` if the criteria are only partially satisfied
 
 ## Frontier Summary
 
@@ -145,7 +146,7 @@ Researcher:
 
 Analyzer:
 - updates quantitative understanding, local findings, and status from execution evidence
-- moves statements from frontier toward known when justified
+- only moves a section from frontier toward known when its stated frontier criteria are met
 
 Codegen and runner:
 - exist to resolve KB questions through bounded experiments

@@ -1,4 +1,5 @@
 import time
+import re
 from pathlib import Path
 from typing import Any
 
@@ -603,7 +604,13 @@ def _update_section_from_analysis(
     matched_dimensions = _matched_dimensions_for_section(section, covered_dimensions)
     if not matches and not matched_dimensions:
         return updated
-    if matches and str(updated.get("status", "")).strip().lower() in {"frontier", "unknown"}:
+    criteria_met, unmet_criteria = _assess_frontier_criteria(
+        section=updated,
+        matches=matches,
+        matched_dimensions=matched_dimensions,
+        analysis=analysis,
+    )
+    if matches and criteria_met and str(updated.get("status", "")).strip().lower() in {"frontier", "unknown"}:
         updated["status"] = "Known"
     evidence = [str(x).strip() for x in updated.get("evidence", []) if str(x).strip()]
     if update_ref not in evidence:
@@ -635,13 +642,15 @@ def _update_section_from_analysis(
         matched_dimensions=matched_dimensions,
         analysis=analysis,
         update_ref=update_ref,
+        criteria_met=criteria_met,
+        unmet_criteria=unmet_criteria,
     )
     if local_finding:
         updated["local_findings"] = _merge_text_block(
             str(updated.get("local_findings", "")).strip(),
             local_finding,
         )
-    if matches:
+    if matches and criteria_met:
         updated["open_questions"] = [
             item
             for item in updated.get("open_questions", [])
@@ -703,19 +712,109 @@ def _synthesize_local_finding(
     matched_dimensions: list[str],
     analysis: dict[str, Any],
     update_ref: str,
+    criteria_met: bool,
+    unmet_criteria: list[str],
 ) -> str:
     heading = str(section.get("section", "")).strip()
     claim_summaries = [str(item.get("claim", "")).strip().rstrip(".") for item in matches if str(item.get("claim", "")).strip()]
     if claim_summaries:
         lead = heading or "This section"
         joined = "; ".join(claim_summaries[:2])
+        if criteria_met:
+            return f"{lead} gained new local support in {update_ref}: {joined}. Frontier criteria were satisfied for this update."
+        if unmet_criteria:
+            unmet = "; ".join(unmet_criteria[:2])
+            return f"{lead} gained partial local support in {update_ref}: {joined}. Frontier criteria remain incomplete: {unmet}."
         return f"{lead} gained new local support in {update_ref}: {joined}."
     summary = str(analysis.get("summary", "")).strip().rstrip(".")
     if summary and matched_dimensions:
         dims_text = ", ".join(matched_dimensions[:3])
         lead = heading or "This section"
+        if unmet_criteria:
+            unmet = "; ".join(unmet_criteria[:2])
+            return f"{lead} received a local analysis update in {update_ref} for {dims_text}: {summary}. Frontier criteria remain incomplete: {unmet}."
         return f"{lead} received a local analysis update in {update_ref} for {dims_text}: {summary}."
     return ""
+
+
+def _assess_frontier_criteria(
+    *,
+    section: dict[str, Any],
+    matches: list[dict[str, Any]],
+    matched_dimensions: list[str],
+    analysis: dict[str, Any],
+) -> tuple[bool, list[str]]:
+    criteria = [str(x).strip() for x in section.get("frontier_criteria", []) if str(x).strip()]
+    if not criteria:
+        return (bool(matches), [])
+    signal_text = _analysis_signal_text(matches=matches, matched_dimensions=matched_dimensions, analysis=analysis)
+    unmet = [criterion for criterion in criteria if not _criterion_satisfied(criterion, signal_text)]
+    return (not unmet and bool(matches), unmet)
+
+
+def _analysis_signal_text(
+    *,
+    matches: list[dict[str, Any]],
+    matched_dimensions: list[str],
+    analysis: dict[str, Any],
+) -> str:
+    parts: list[str] = [str(analysis.get("summary", "")).strip().lower()]
+    parts.extend(str(item).strip().lower() for item in matched_dimensions if str(item).strip())
+    for claim in matches:
+        if not isinstance(claim, dict):
+            continue
+        parts.append(str(claim.get("claim", "")).strip().lower())
+        parts.extend(str(item).strip().lower() for item in claim.get("dimensions", []) if str(item).strip())
+        parts.append(str(claim.get("method_summary", "")).strip().lower())
+    return " ".join(part for part in parts if part)
+
+
+def _criterion_satisfied(criterion: str, signal_text: str) -> bool:
+    text = str(criterion or "").strip().lower()
+    signal = str(signal_text or "").strip().lower()
+    if not text:
+        return True
+    if not signal:
+        return False
+    if "bandwidth estimate" in text or ("bandwidth" in text and "estimate" in text):
+        return _contains_any(signal, ["bandwidth", "throughput", "gb/s", "gib/s"]) and (
+            _contains_any(signal, ["benchmark", "measured", "measurement", "sustain", "estimate"])
+            or _contains_number(signal)
+        )
+    if "conditions" in text or "reuse" in text or "documented" in text:
+        return _contains_any(signal, ["condition", "configuration", "config", "launch", "block", "grid", "documented", "reuse"])
+    if "stride" in text or "access pattern" in text:
+        return _contains_any(signal, ["stride", "coalescing", "coalesced", "uncoalesced", "access pattern"]) and _contains_any(
+            signal, ["throughput", "bandwidth", "trend", "curve", "degrad", "change"]
+        )
+    if "stable enough" in text or "describe quantitatively" in text:
+        return _contains_any(signal, ["stable", "trend", "curve", "threshold", "slope", "quantitative", "regime"])
+    if "working-set sweep" in text or "cache-to-dram transition" in text:
+        return _contains_any(signal, ["working_set", "working-set", "cache", "l2", "dram"]) and _contains_any(
+            signal, ["transition", "regime", "latency", "bandwidth", "sweep"]
+        )
+    if "register-pressure" in text or "register pressure" in text:
+        return _contains_any(signal, ["register", "register_pressure", "registers_per_thread"]) and _contains_any(
+            signal, ["occupancy", "throughput", "resident", "warp", "warps"]
+        )
+    if "occupancy" in text and "throughput" in text:
+        return _contains_any(signal, ["occupancy", "warp", "warps"]) and _contains_any(
+            signal, ["throughput", "latency", "hide", "hiding"]
+        )
+    if "ceiling" in text:
+        return _contains_any(signal, ["ceiling", "roofline", "bandwidth", "compute"])
+    criterion_tokens = [token for token in _question_tokens(text) if token not in {"local", "evidence", "clear", "clearly", "enough", "resulting"}]
+    overlaps = [token for token in criterion_tokens if token in signal]
+    threshold = 2 if len(criterion_tokens) >= 3 else 1
+    return len(overlaps) >= threshold
+
+
+def _contains_any(text: str, needles: list[str]) -> bool:
+    return any(str(item).lower() in text for item in needles)
+
+
+def _contains_number(text: str) -> bool:
+    return re.search(r"\d", str(text or "")) is not None
 
 
 def _merge_text_block(existing: str, new_text: str) -> str:
