@@ -11,7 +11,7 @@ from pathlib import Path
 from statistics import median
 from typing import Any
 
-from gpu_profiler.llm import OpenAIWorkflowBackend, ResearchDecision
+from gpu_profiler.workflow.llm import OpenAIWorkflowBackend, ResearchDecision
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -10,7 +10,11 @@ This repository is organized by purpose.
 
 ## Runtime Code
 
-- `gpu_profiler/`: orchestration, agents, knowledge-base updates, markdown parsing, models, and storage helpers
+- `gpu_profiler/core/`: shared models and storage helpers
+- `gpu_profiler/knowledge/`: markdown knowledge base and markdown parsing helpers
+- `gpu_profiler/runtime/`: agents and orchestrator
+- `gpu_profiler/workflow/`: planner, research, codegen, and analysis backend logic
+- `gpu_profiler/cli.py`: package CLI
 
 ## Tests
 

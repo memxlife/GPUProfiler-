@@ -8,14 +8,14 @@ from pathlib import Path
 from typing import Any
 
 from .agents import Agent, default_agents
-from .knowledge_base import initialize_markdown_knowledge_base
-from .llm import HeuristicWorkflowBackend, OpenAIWorkflowBackend, ResilientWorkflowBackend
-from .markdown_artifacts import (
+from ..knowledge.knowledge_base import initialize_markdown_knowledge_base
+from ..workflow.llm import HeuristicWorkflowBackend, OpenAIWorkflowBackend, ResilientWorkflowBackend
+from ..knowledge.markdown_artifacts import (
     parse_analysis_markdown,
     parse_research_markdown,
 )
-from .models import AgentContext, RetryPolicy, Task
-from .store import write_json
+from ..core.models import AgentContext, RetryPolicy, Task
+from ..core.store import write_json
 
 DEFAULT_TARGET_DIMENSIONS: list[str] = []
 

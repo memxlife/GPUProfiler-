@@ -9,7 +9,7 @@ For the repository layout, see `docs/PROJECT_STRUCTURE.md`.
 
 ## Project Layout
 
-- `gpu_profiler/`: runtime orchestration and agent code
+- `gpu_profiler/`: runtime package split into `core/`, `knowledge/`, `runtime/`, and `workflow/`
 - `tests/`: repo tests
 - `docs/`: design, build contract, KB template, and artifact conventions
 - `scripts/`: local diagnostics and OpenAI probe utilities

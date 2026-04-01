@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .llm import (
+from ..workflow.llm import (
     CODEGEN_SYSTEM_PROMPT,
     HeuristicWorkflowBackend,
     LLMWorkflowBackend,
@@ -21,9 +21,9 @@ from .llm import (
     CODEGEN_INPUT_HARD_CAP_CHARS,
     CODEGEN_INPUT_TARGET_CHARS,
 )
-from .knowledge_base import load_markdown_knowledge_base_memos, update_markdown_knowledge_base
-from .models import AgentContext, Task
-from .store import read_json, write_json, write_text
+from ..knowledge.knowledge_base import load_markdown_knowledge_base_memos, update_markdown_knowledge_base
+from ..core.models import AgentContext, Task
+from ..core.store import read_json, write_json, write_text
 
 PASSWORDLESS_SUDO_NCU_CANDIDATES = (
     "/usr/local/cuda/bin/ncu",

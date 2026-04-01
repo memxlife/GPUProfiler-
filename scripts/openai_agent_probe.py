@@ -16,7 +16,7 @@ from scripts.openai_research_probe import (
     slugify,
     summarize_latencies,
 )
-from gpu_profiler.llm import OpenAIWorkflowBackend
+from gpu_profiler.workflow.llm import OpenAIWorkflowBackend
 
 AGENT_CHOICES = (
     "plan_research_request",

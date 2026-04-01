@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .store import write_text
+from ..core.store import write_text
 
 
 def initialize_markdown_knowledge_base(run_dir: Path, intent: str) -> dict[str, str]:

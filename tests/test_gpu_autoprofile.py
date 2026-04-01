@@ -4,13 +4,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-from gpu_profiler.agents import _render_research_md
-from gpu_profiler.knowledge_base import (
+from gpu_profiler.runtime.agents import _render_research_md
+from gpu_profiler.knowledge.knowledge_base import (
     initialize_markdown_knowledge_base,
     load_markdown_knowledge_base_memos,
     update_markdown_knowledge_base,
 )
-from gpu_profiler.llm import _compact_codegen_kb, _compact_codegen_plan, _next_frontier_question, _render_codegen_prompt
+from gpu_profiler.workflow.llm import (
+    _compact_codegen_kb,
+    _compact_codegen_plan,
+    _next_frontier_question,
+    _render_codegen_prompt,
+)
 
 
 def run_cli(tmp_path: Path, *args: str) -> dict:
