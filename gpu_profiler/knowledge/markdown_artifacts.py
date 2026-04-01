@@ -1,4 +1,3 @@
-import ast
 import re
 from typing import Any
 
@@ -64,20 +63,6 @@ def markdown_scalar(text: str) -> str:
     return ""
 
 
-def markdown_list_value(text: str) -> list[str]:
-    value = _strip_ticks(text)
-    if not value:
-        return []
-    if value.startswith("[") and value.endswith("]"):
-        try:
-            parsed = ast.literal_eval(value)
-        except Exception:
-            parsed = None
-        if isinstance(parsed, list):
-            return [str(item).strip() for item in parsed if str(item).strip()]
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
 def parse_research_request_markdown(text: str) -> dict[str, Any]:
     return {
         "request_summary": markdown_scalar(markdown_section(text, "Objective")),
@@ -85,43 +70,6 @@ def parse_research_request_markdown(text: str) -> dict[str, Any]:
         "target_questions": markdown_bullets(markdown_section(text, "Questions")),
         "search_topics": markdown_bullets(markdown_section(text, "Search Topics")),
         "expected_outputs": markdown_bullets(markdown_section(text, "Expected Outputs")),
-    }
-
-
-def parse_proposal_markdown(text: str) -> dict[str, Any]:
-    proposal_summary = markdown_scalar(markdown_section(text, "Proposal Summary"))
-    target_nodes = markdown_bullets(markdown_section(text, "Target Nodes"))
-    proposed_benchmarks = markdown_section(text, "Proposed Benchmarks")
-    benchmark_sections = split_markdown_sections(proposed_benchmarks, level=3)
-    proposals: list[dict[str, Any]] = []
-    aggregated_target_nodes: list[str] = list(target_nodes)
-    for title, body in benchmark_sections.items():
-        fields = markdown_key_values(body)
-        bench_target_nodes = markdown_bullets(markdown_section(body, "Target Nodes", level=4))
-        required_evidence = markdown_bullets(markdown_section(body, "Required Evidence", level=4))
-        success_unlocks = markdown_scalar(markdown_section(body, "What Success Unlocks", level=4))
-        if not bench_target_nodes:
-            bench_target_nodes = markdown_list_value(fields.get("target node ids", ""))
-        for item in bench_target_nodes:
-            if item not in aggregated_target_nodes:
-                aggregated_target_nodes.append(item)
-        proposals.append(
-            {
-                "id": fields.get("id", ""),
-                "title": fields.get("title", title.strip() or fields.get("id", "")),
-                "benchmark_role": fields.get("benchmark role", ""),
-                "objective": fields.get("objective", ""),
-                "hypothesis": fields.get("hypothesis", ""),
-                "rationale": fields.get("rationale", ""),
-                "target_node_ids": bench_target_nodes,
-                "required_evidence": required_evidence,
-                "success_unlocks": success_unlocks,
-            }
-        )
-    return {
-        "proposal_summary": proposal_summary,
-        "target_nodes": aggregated_target_nodes,
-        "proposals": proposals,
     }
 
 
