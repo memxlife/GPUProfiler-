@@ -1,13 +1,32 @@
 import json
+import re
 import shlex
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
-from .llm import HeuristicWorkflowBackend, LLMWorkflowBackend
+from .llm import (
+    CODEGEN_SYSTEM_PROMPT,
+    HeuristicWorkflowBackend,
+    LLMWorkflowBackend,
+    _compact_codegen_kb,
+    _compact_codegen_plan,
+    _enforce_payload_budget,
+    _proposal_focus_nodes,
+    _render_codegen_prompt,
+    _trim_codegen_payload,
+    _trim_text,
+    CODEGEN_INPUT_HARD_CAP_CHARS,
+    CODEGEN_INPUT_TARGET_CHARS,
+)
 from .models import AgentContext, Task
 from .store import read_json, write_json, write_text
+
+PASSWORDLESS_SUDO_NCU_CANDIDATES = (
+    "/usr/local/cuda/bin/ncu",
+    "/usr/local/cuda-13.0/bin/ncu",
+)
 
 
 class Agent:
@@ -90,6 +109,7 @@ class LLMPlanningAgent(Agent):
             }
             research_request_path = iter_dir / "research_request.json"
             research_request_md_path = iter_dir / "research_request.md"
+            research_request_raw_path = iter_dir / "research_request_raw.md"
             if isinstance(decision.research_request, dict):
                 write_json(research_request_path, decision.research_request)
                 write_text(research_request_md_path, _render_research_request_md(result))
@@ -98,6 +118,11 @@ class LLMPlanningAgent(Agent):
             else:
                 result["research_request_artifact"] = None
                 result["research_request_meta_artifact"] = None
+            if decision.raw_response:
+                write_text(research_request_raw_path, decision.raw_response)
+                result["research_request_raw_artifact"] = str(research_request_raw_path)
+            else:
+                result["research_request_raw_artifact"] = None
             return result
 
         if task.kind == "llm_plan_proposal":
@@ -120,10 +145,14 @@ class LLMPlanningAgent(Agent):
             }
             proposal_path = iter_dir / "proposal.json"
             proposal_md_path = iter_dir / "proposal.md"
+            proposal_raw_path = iter_dir / "proposal_raw.md"
             write_json(proposal_path, decision.proposal)
             write_text(proposal_md_path, _render_proposal_md(plan))
+            if decision.raw_response:
+                write_text(proposal_raw_path, decision.raw_response)
             plan["proposal_artifact"] = str(proposal_path)
             plan["proposal_md_artifact"] = str(proposal_md_path)
+            plan["proposal_raw_artifact"] = str(proposal_raw_path) if decision.raw_response else None
             return plan
 
         decision = self.workflow_backend.propose_plan(
@@ -245,10 +274,14 @@ class LLMResearchAgent(Agent):
         iter_dir.mkdir(parents=True, exist_ok=True)
         json_path = iter_dir / "research.json"
         md_path = iter_dir / "research.md"
+        raw_path = iter_dir / "research_raw.md"
         write_json(json_path, result)
         write_text(md_path, _render_research_md(result))
+        if decision.raw_response:
+            write_text(raw_path, decision.raw_response)
         result["artifact"] = str(json_path)
         result["artifact_md"] = str(md_path)
+        result["raw_artifact"] = str(raw_path) if decision.raw_response else None
         return result
 
 
@@ -269,19 +302,59 @@ class LLMCodegenAgent(Agent):
         max_benchmarks = int(task.payload.get("max_benchmarks", 2))
         amendment_round = int(task.payload.get("amendment_round", 0))
         amendment_feedback = task.payload.get("amendment_feedback", [])
+        proposal_memo = _read_text_artifact(plan.get("proposal_md_artifact"))
+        working_proposal_memo = proposal_memo
 
-        decision = self.workflow_backend.generate_implementation(
-            intent=intent,
-            kb=kb,
-            plan=plan,
-            iteration=iteration,
-            max_benchmarks=max_benchmarks,
-            proposal_memo=_read_text_artifact(plan.get("proposal_md_artifact")),
-        )
-        accepted, rejected, policy = _apply_negotiation_policy(
-            benchmarks=decision.benchmarks,
-            schema_contract=kb.get("schema_contract", {}),
-        )
+        prompt_sections: list[str] = []
+        focus = _proposal_focus_nodes(plan.get("proposal", {}))[: max(1, max_benchmarks)]
+        if not focus:
+            focus = [f"dimension_{iteration + 1}"]
+        iter_dir = _iteration_dir(ctx.run_dir, iteration)
+        iter_dir.mkdir(parents=True, exist_ok=True)
+        decision = None
+        accepted: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        policy: dict[str, Any] = {}
+        preflight_results: list[dict[str, Any]] = []
+        preflight_feedback: list[str] = []
+        max_codegen_attempts = 2
+        for codegen_attempt in range(max_codegen_attempts):
+            prompt_sections.extend(
+                _build_codegen_prompt_sections(
+                    intent=intent,
+                    kb=kb,
+                    plan=plan,
+                    iteration=iteration,
+                    focus=focus,
+                    proposal_memo=working_proposal_memo,
+                    start_index=len(prompt_sections),
+                )
+            )
+            decision = self.workflow_backend.generate_implementation(
+                intent=intent,
+                kb=kb,
+                plan=plan,
+                iteration=iteration,
+                max_benchmarks=max_benchmarks,
+                proposal_memo=working_proposal_memo,
+            )
+            accepted, rejected, policy = _apply_negotiation_policy(
+                benchmarks=decision.benchmarks,
+                schema_contract=kb.get("schema_contract", {}),
+            )
+            generated_files = _materialize_generated_files(iter_dir, accepted)
+            accepted, preflight_rejected, preflight_results = _preflight_codegen_benchmarks(iter_dir, accepted)
+            rejected.extend(preflight_rejected)
+            if accepted or not preflight_rejected or codegen_attempt + 1 >= max_codegen_attempts:
+                break
+            failure_notes = _format_preflight_feedback(preflight_results)
+            if not failure_notes:
+                break
+            preflight_feedback.append(failure_notes)
+            working_proposal_memo = _append_codegen_feedback(proposal_memo, preflight_feedback)
+        else:
+            generated_files = []
+
         accepted = [_annotate_feasibility(item, policy) for item in accepted]
         feasibility_report = _build_feasibility_report(
             accepted=accepted,
@@ -292,11 +365,11 @@ class LLMCodegenAgent(Agent):
         implementation = {
             "iteration": iteration,
             "intent": intent,
-            "planner": decision.planner,
-            "reason": decision.reason,
+            "planner": decision.planner if decision else "unknown-planner",
+            "reason": decision.reason if decision else "Code generation failed before producing an implementation.",
             "benchmarks": accepted,
             "rejected_benchmarks": rejected,
-            "contract_amendments": decision.contract_amendments,
+            "contract_amendments": decision.contract_amendments if decision else [],
             "feasibility_summary": feasibility_report.get("summary", {}),
             "negotiation": {
                 "policy": policy,
@@ -306,19 +379,26 @@ class LLMCodegenAgent(Agent):
                 "rejected_count": len(rejected),
             },
         }
-        iter_dir = _iteration_dir(ctx.run_dir, iteration)
-        iter_dir.mkdir(parents=True, exist_ok=True)
-        generated_files = _materialize_generated_files(iter_dir, accepted)
         implementation["generated_files"] = generated_files
         json_path = iter_dir / "implementation.json"
         md_path = iter_dir / "implementation.md"
         feasibility_path = iter_dir / "feasibility_report.json"
+        preflight_path = iter_dir / "implementation_preflight.json"
+        raw_path = iter_dir / "implementation_raw.md"
+        prompt_path = iter_dir / "implementation_prompt.md"
         write_json(json_path, implementation)
         write_json(feasibility_path, feasibility_report)
+        write_json(preflight_path, preflight_results)
         write_text(md_path, _render_implementation_md(implementation))
+        write_text(prompt_path, "\n\n---\n\n".join(prompt_sections))
+        if decision and decision.raw_response:
+            write_text(raw_path, decision.raw_response)
         implementation["artifact"] = str(json_path)
         implementation["artifact_md"] = str(md_path)
         implementation["feasibility_artifact"] = str(feasibility_path)
+        implementation["preflight_artifact"] = str(preflight_path)
+        implementation["prompt_artifact"] = str(prompt_path)
+        implementation["raw_artifact"] = str(raw_path) if decision and decision.raw_response else None
         return implementation
 
 
@@ -411,18 +491,34 @@ class WorkloadRunnerAgent(Agent):
         command = task.payload.get("command")
         if not command:
             raise ValueError("run_workload task missing command")
+        cwd_path = str(task.payload.get("cwd_path", "")).strip()
+        cwd = Path(cwd_path) if cwd_path else None
 
         start = time.time()
-        proc = subprocess.run(shlex.split(command), capture_output=True, text=True)
+        executed_command = str(command)
+        proc = _run_shell_command(executed_command, cwd=cwd)
+        retried_with_sudo_ncu = False
+        sudo_ncu_path = ""
+        if _should_retry_with_sudo_ncu(executed_command, proc):
+            sudo_ncu_path = _find_passwordless_sudo_ncu_path()
+            retry_command = _rewrite_command_with_sudo_ncu(executed_command, sudo_ncu_path)
+            if retry_command != executed_command:
+                proc = _run_shell_command(retry_command, cwd=cwd)
+                executed_command = retry_command
+                retried_with_sudo_ncu = True
         elapsed = time.time() - start
 
         out = {
-            "command": command,
+            "command": executed_command,
+            "original_command": str(command),
+            "cwd": str(cwd) if cwd else "",
             "returncode": proc.returncode,
             "elapsed_sec": elapsed,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
             "skipped": _is_skipped_workload(proc.stdout, proc.stderr),
+            "retried_with_sudo_ncu": retried_with_sudo_ncu,
+            "sudo_ncu_path": sudo_ncu_path,
         }
         artifact = ctx.run_dir / "workload_result.json"
         artifact_override = task.payload.get("artifact_path")
@@ -431,6 +527,40 @@ class WorkloadRunnerAgent(Agent):
         write_json(artifact, out)
         out["artifact"] = str(artifact)
         return out
+
+
+def _run_shell_command(command: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["bash", "-lc", str(command)], capture_output=True, text=True, cwd=cwd)
+
+
+def _should_retry_with_sudo_ncu(command: str, proc: subprocess.CompletedProcess[str]) -> bool:
+    if proc.returncode == 0:
+        return False
+    if not _contains_ncu_invocation(command):
+        return False
+    combined_output = f"{proc.stdout}\n{proc.stderr}"
+    if "ERR_NVGPUCTRPERM" not in combined_output:
+        return False
+    return "sudo -n " not in str(command)
+
+
+def _contains_ncu_invocation(command: str) -> bool:
+    return bool(re.search(r"(?<!\S)(?:ncu|/usr/local/cuda(?:-[^/\s]+)?/bin/ncu)(?=\s|$)", str(command)))
+
+
+def _find_passwordless_sudo_ncu_path() -> str:
+    for candidate in PASSWORDLESS_SUDO_NCU_CANDIDATES:
+        probe = subprocess.run(["sudo", "-n", candidate, "--version"], capture_output=True, text=True)
+        if probe.returncode == 0:
+            return candidate
+    return ""
+
+
+def _rewrite_command_with_sudo_ncu(command: str, sudo_ncu_path: str) -> str:
+    if not sudo_ncu_path:
+        return str(command)
+    pattern = r"(?<!\S)(?:ncu|/usr/local/cuda(?:-[^/\s]+)?/bin/ncu)(?=\s|$)"
+    return re.sub(pattern, f"sudo -n {shlex.quote(sudo_ncu_path)}", str(command))
 
 
 class AnalyzerAgent(Agent):
@@ -499,11 +629,16 @@ class BenchmarkCycleAgent(Agent):
         baseline_records = self.collector.collect(samples=samples, interval_sec=interval_sec)
         baseline_path = bench_dir / "metrics_baseline.json"
         write_json(baseline_path, baseline_records)
+        command_cwd = _iteration_dir(ctx.run_dir, iteration) / benchmark_id
 
         workload_task = Task(
             id=f"bench-workload-{iteration}-{index}",
             kind="run_workload",
-            payload={"command": command, "artifact_path": str(bench_dir / "workload_result.json")},
+            payload={
+                "command": command,
+                "artifact_path": str(bench_dir / "workload_result.json"),
+                "cwd_path": str(command_cwd),
+            },
         )
         workload_result = self.runner.run(workload_task, ctx)
 
@@ -691,6 +826,55 @@ class LLMAnalysisAgent(Agent):
         return out
 
 
+class CommunicationMonitorAgent(Agent):
+    name = "communication-monitor"
+
+    def can_handle(self, task: Task) -> bool:
+        return task.kind == "monitor_communications"
+
+    def run(self, task: Task, ctx: AgentContext) -> dict[str, Any]:
+        event = task.payload.get("event", {})
+        if not isinstance(event, dict):
+            raise ValueError("monitor_communications requires event payload")
+
+        global_json_path = ctx.run_dir / "agent_conversation.json"
+        global_md_path = ctx.run_dir / "agent_conversation.md"
+        events = read_json(global_json_path, [])
+        if not isinstance(events, list):
+            events = []
+        events.append(event)
+        write_json(global_json_path, events)
+        write_text(global_md_path, _render_agent_conversation(events, ctx.run_id))
+        latest_turn = _render_agent_conversation_turn(event, len(events))
+        latest_screen_line = _render_agent_conversation_screen_line(event, len(events))
+
+        result: dict[str, Any] = {
+            "artifact": str(global_json_path),
+            "artifact_md": str(global_md_path),
+            "events_recorded": len(events),
+            "screen_output": latest_screen_line,
+        }
+
+        iteration = event.get("iteration")
+        if iteration is not None:
+            try:
+                iter_dir = _iteration_dir(ctx.run_dir, int(iteration))
+                iter_dir.mkdir(parents=True, exist_ok=True)
+                iter_json_path = iter_dir / "conversation.json"
+                iter_md_path = iter_dir / "conversation.md"
+                iter_events = read_json(iter_json_path, [])
+                if not isinstance(iter_events, list):
+                    iter_events = []
+                iter_events.append(event)
+                write_json(iter_json_path, iter_events)
+                write_text(iter_md_path, _render_agent_conversation(iter_events, f"{ctx.run_id} iter {int(iteration):02d}"))
+                result["iteration_artifact"] = str(iter_json_path)
+                result["iteration_artifact_md"] = str(iter_md_path)
+            except Exception:
+                pass
+        return result
+
+
 class AutonomousReporterAgent(Agent):
     name = "autonomous-reporter"
 
@@ -770,6 +954,7 @@ class ReporterAgent(Agent):
 def default_agents(workflow_backend: LLMWorkflowBackend | None = None) -> list[Agent]:
     backend = workflow_backend or HeuristicWorkflowBackend()
     return [
+        CommunicationMonitorAgent(),
         PlannerAgent(),
         LLMSchemaContractAgent(workflow_backend=backend),
         LLMResearchAgent(workflow_backend=backend),
@@ -785,6 +970,36 @@ def default_agents(workflow_backend: LLMWorkflowBackend | None = None) -> list[A
         AutonomousReporterAgent(),
         ReporterAgent(),
     ]
+
+
+def _render_agent_conversation(events: list[dict[str, Any]], title: str) -> str:
+    lines = [f"# Agent Conversation ({title})", ""]
+    for index, event in enumerate(events, start=1):
+        lines.extend(_render_agent_conversation_turn(event, index).splitlines())
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_agent_conversation_turn(event: dict[str, Any], turn_index: int) -> str:
+    sender = str(event.get("sender", "")).strip() or "unknown"
+    recipient = str(event.get("recipient", "")).strip() or "unknown"
+    lines = [f"## Turn {turn_index}"]
+    summary = str(event.get("summary", "")).strip()
+    if summary:
+        lines.append(f"{sender} to {recipient}:")
+        lines.append(summary)
+        lines.append("")
+    body = str(event.get("message", "")).strip()
+    if body:
+        lines.append(body)
+    return "\n".join(lines).rstrip()
+
+
+def _render_agent_conversation_screen_line(event: dict[str, Any], turn_index: int) -> str:
+    sender = str(event.get("sender", "")).strip() or "unknown"
+    recipient = str(event.get("recipient", "")).strip() or "unknown"
+    summary = " ".join(str(event.get("summary", "")).strip().split())
+    return f"Round #{turn_index}, {sender} -> {recipient}: message: {summary}"
 
 
 def _iteration_dir(run_dir: Path, iteration: int) -> Path:
@@ -1308,6 +1523,54 @@ def _render_schema_contract_md(contract: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _build_codegen_prompt_sections(
+    intent: str,
+    kb: dict[str, Any],
+    plan: dict[str, Any],
+    iteration: int,
+    focus: list[str],
+    proposal_memo: str,
+    start_index: int = 0,
+) -> list[str]:
+    sections: list[str] = []
+    for dim in focus:
+        prompt_payload = {
+            "intent": intent,
+            "knowledge_base": _compact_codegen_kb(kb=kb, dimension=dim),
+            "plan": _compact_codegen_plan(plan=plan, dimension=dim),
+            "iteration": iteration,
+            "dimension": dim,
+            "proposal_memo": _trim_text(proposal_memo, 3000),
+            "constraints": {
+                "bounded_runtime": "Each command should complete in <= 45 seconds when possible.",
+                "safety": "No destructive commands, no system configuration mutation.",
+                "no_inventory_only": "Do not return inventory/topology-only probes as benchmarks.",
+            },
+        }
+        prompt_payload = _enforce_payload_budget(
+            prompt_payload,
+            target_chars=CODEGEN_INPUT_TARGET_CHARS,
+            hard_cap_chars=CODEGEN_INPUT_HARD_CAP_CHARS,
+            trimmers=[_trim_codegen_payload],
+        )
+        sections.append(
+            "\n".join(
+                [
+                    f"# Codegen Prompt {start_index + len(sections) + 1}",
+                    "",
+                    f"## Target Dimension\n{dim}",
+                    "",
+                    "## System Prompt",
+                    CODEGEN_SYSTEM_PROMPT,
+                    "",
+                    "## User Prompt",
+                    _render_codegen_prompt(prompt_payload),
+                ]
+            )
+        )
+    return sections
+
+
 def _materialize_generated_files(iter_dir: Path, benchmarks: list[dict[str, Any]]) -> list[str]:
     written: list[str] = []
     for bench in benchmarks:
@@ -1326,6 +1589,157 @@ def _materialize_generated_files(iter_dir: Path, benchmarks: list[dict[str, Any]
             write_text(out_path, content)
             written.append(str(out_path))
     return written
+
+
+def _preflight_codegen_benchmarks(
+    iter_dir: Path, benchmarks: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    reports: list[dict[str, Any]] = []
+    for bench in benchmarks:
+        report = _preflight_single_benchmark(iter_dir, bench)
+        reports.append(report)
+        bench["preflight"] = report
+        if report.get("ok"):
+            accepted.append(bench)
+            continue
+        rejected.append(
+            {
+                "id": bench.get("id"),
+                "command": bench.get("command"),
+                "dimensions": bench.get("dimensions", []),
+                "hypothesis": bench.get("hypothesis"),
+                "rejection_reason": report.get("reason", "preflight failed"),
+                "preflight": report,
+            }
+        )
+    return accepted, rejected, reports
+
+
+def _preflight_single_benchmark(iter_dir: Path, benchmark: dict[str, Any]) -> dict[str, Any]:
+    bench_id = str(benchmark.get("id", "benchmark")).strip() or "benchmark"
+    command = str(benchmark.get("command", "")).strip()
+    cwd = iter_dir / bench_id
+    report: dict[str, Any] = {
+        "benchmark_id": bench_id,
+        "cwd": str(cwd),
+        "command": command,
+        "checked": False,
+        "ok": True,
+        "reason": "",
+        "missing_files": [],
+        "preflight_command": "",
+        "returncode": None,
+        "stdout": "",
+        "stderr": "",
+    }
+    missing_files = []
+    for file_spec in benchmark.get("files", []):
+        rel_path = str((file_spec or {}).get("path", "")).strip()
+        if not rel_path:
+            continue
+        target = cwd / rel_path
+        if not target.exists():
+            missing_files.append(rel_path)
+    if missing_files:
+        report["ok"] = False
+        report["reason"] = "generated source files were not materialized at the expected paths"
+        report["missing_files"] = missing_files
+        return report
+
+    preflight_command, expected_output = _extract_compile_preflight(command)
+    if not preflight_command:
+        report["reason"] = "no compile preflight required"
+        return report
+
+    report["checked"] = True
+    report["preflight_command"] = preflight_command
+    try:
+        proc = subprocess.run(
+            ["bash", "-lc", preflight_command],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=60,
+        )
+        report["returncode"] = proc.returncode
+        report["stdout"] = proc.stdout
+        report["stderr"] = proc.stderr
+        if proc.returncode != 0:
+            report["ok"] = False
+            report["reason"] = "compile preflight failed"
+            return report
+    except Exception as exc:  # noqa: BLE001
+        report["ok"] = False
+        report["reason"] = f"compile preflight errored: {exc}"
+        report["stderr"] = str(exc)
+        return report
+
+    if expected_output:
+        output_path = cwd / expected_output
+        report["expected_output"] = str(output_path)
+        if not output_path.exists():
+            report["ok"] = False
+            report["reason"] = "compile preflight succeeded but expected binary was not created"
+            return report
+    report["reason"] = "compile preflight passed"
+    return report
+
+
+def _extract_compile_preflight(command: str) -> tuple[str, str]:
+    segments = [segment.strip() for segment in str(command or "").split("&&") if segment.strip()]
+    if not segments:
+        return "", ""
+    for index, segment in enumerate(segments):
+        if _looks_like_compile_segment(segment):
+            return " && ".join(segments[: index + 1]), _extract_compile_output_path(segment)
+    return "", ""
+
+
+def _looks_like_compile_segment(segment: str) -> bool:
+    lowered = str(segment or "").strip().lower()
+    return lowered.startswith("nvcc ") or lowered == "nvcc" or " nvcc " in lowered
+
+
+def _extract_compile_output_path(segment: str) -> str:
+    try:
+        tokens = shlex.split(segment)
+    except Exception:
+        tokens = str(segment or "").split()
+    for index, token in enumerate(tokens):
+        if token == "-o" and index + 1 < len(tokens):
+            return tokens[index + 1]
+    return ""
+
+
+def _format_preflight_feedback(reports: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for report in reports:
+        if report.get("ok"):
+            continue
+        bench_id = str(report.get("benchmark_id", "")).strip() or "benchmark"
+        reason = str(report.get("reason", "")).strip() or "preflight failed"
+        stderr = _trim_text(report.get("stderr", ""), 1200)
+        missing = report.get("missing_files", [])
+        lines.append(f"- {bench_id}: {reason}")
+        if missing:
+            lines.append(f"  missing_files: {missing}")
+        if stderr:
+            lines.append(f"  compiler_stderr: {stderr}")
+    return "\n".join(lines).strip()
+
+
+def _append_codegen_feedback(proposal_memo: str, feedback: list[str]) -> str:
+    clean_feedback = [str(item).strip() for item in feedback if str(item).strip()]
+    if not clean_feedback:
+        return proposal_memo
+    return (
+        f"{proposal_memo.rstrip()}\n\n"
+        "Preflight repair feedback:\n"
+        "Your previous implementation did not compile locally. Return a corrected full implementation.\n"
+        + "\n\n".join(clean_feedback)
+    ).strip()
 
 
 def _infer_target_dimensions(

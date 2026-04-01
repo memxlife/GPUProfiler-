@@ -1,8 +1,12 @@
 import json
 import multiprocessing
 import os
+from pathlib import Path
 import re
 import signal
+import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,8 +14,24 @@ PLANNER_INPUT_TARGET_CHARS = 6000
 PLANNER_INPUT_HARD_CAP_CHARS = 10000
 PLANNER_RESEARCH_INPUT_TARGET_CHARS = 4000
 PLANNER_RESEARCH_INPUT_HARD_CAP_CHARS = 6000
+PLANNER_REQUEST_TIMEOUT_SEC = 15.0
 CODEGEN_INPUT_TARGET_CHARS = 8000
 CODEGEN_INPUT_HARD_CAP_CHARS = 12000
+CODEGEN_TIMEOUT_SEC = 35.0
+CODEGEN_REPAIR_ATTEMPTS = 1
+RESEARCH_TIMEOUT_SEC = 35.0
+ANALYSIS_TIMEOUT_SEC = 20.0
+OPENAI_RESPONSE_ROBUST_THRESHOLD_MULTIPLIER = 2.0
+OPENAI_RESPONSE_DEFAULT_THRESHOLD_SEC = 45.0
+OPENAI_RESPONSE_RESEARCH_THRESHOLD_SEC = 90.0
+OPENAI_RESPONSE_ANALYSIS_THRESHOLD_SEC = 75.0
+OPENAI_RESPONSE_CODEGEN_THRESHOLD_SEC = 120.0
+CODEGEN_SYSTEM_PROMPT = (
+    "You are a CUDA benchmark code-generation agent. Answer briefly and directly in plain Markdown. "
+    "Do not output JSON. Produce exactly one concrete benchmark implementation memo. "
+    "The implementation must use CUDA C++ source (.cu) and a compile/run shell command. "
+    "Do not use Python benchmark scripts."
+)
 
 
 @dataclass
@@ -19,6 +39,7 @@ class ResearchRequestPlanDecision:
     reason: str
     research_request: dict[str, Any] | None
     planner: str
+    raw_response: str = ""
 
 
 @dataclass
@@ -26,6 +47,7 @@ class ProposalPlanDecision:
     reason: str
     proposal: dict[str, Any]
     planner: str
+    raw_response: str = ""
 
 
 @dataclass
@@ -44,6 +66,7 @@ class ImplementationDecision:
     negotiation: dict[str, Any]
     contract_amendments: list[dict[str, Any]]
     planner: str
+    raw_response: str = ""
 
 
 @dataclass
@@ -75,6 +98,7 @@ class ResearchDecision:
     findings: list[dict[str, Any]]
     proposed_dimensions: list[str]
     planner: str
+    raw_response: str = ""
 
 
 class LLMWorkflowBackend:
@@ -247,6 +271,7 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
             findings=[],
             proposed_dimensions=[],
             planner=self.name,
+            raw_response="",
         )
 
     def propose_plan(
@@ -287,6 +312,7 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
             reason="Fallback planner produced a generic research request.",
             research_request=_default_research_request(intent=intent, focus_dimensions=focus),
             planner=self.name,
+            raw_response="",
         )
 
     def plan_proposal(
@@ -304,6 +330,7 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
             reason="Fallback planner produced generic plan items.",
             proposal=_default_proposal(intent=intent, focus_dimensions=focus, iteration=iteration),
             planner=self.name,
+            raw_response="",
         )
 
     def generate_implementation(
@@ -356,6 +383,7 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
             negotiation={"accepted": [], "rejected": [], "policy": _default_negotiation_policy()},
             contract_amendments=[],
             planner=self.name,
+            raw_response="",
         )
 
     def analyze_results(
@@ -414,7 +442,7 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
 
 
 class OpenAIWorkflowBackend(LLMWorkflowBackend):
-    def __init__(self, model: str = "gpt-5.4", request_timeout_sec: float = 15.0) -> None:
+    def __init__(self, model: str = "gpt-5.4", request_timeout_sec: float = PLANNER_REQUEST_TIMEOUT_SEC) -> None:
         self.model = model
         self.request_timeout_sec = max(1.0, float(request_timeout_sec))
         self.name = f"openai:{self.model}"
@@ -469,6 +497,8 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                 "Return strict JSON only."
             ),
             user=payload,
+            context="schema-contract",
+            timeout_sec=PLANNER_REQUEST_TIMEOUT_SEC,
         )
         contract = out.get("schema_contract", {})
         if not isinstance(contract, dict):
@@ -524,6 +554,8 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             ),
             user=payload,
             tools=[{"type": "web_search_preview"}],
+            context="research-context",
+            timeout_sec=RESEARCH_TIMEOUT_SEC,
         )
         findings = out.get("findings", [])
         if not isinstance(findings, list):
@@ -551,6 +583,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             findings=clean_findings,
             proposed_dimensions=dims,
             planner=self.name,
+            raw_response=json.dumps(out, indent=2),
         )
 
     def propose_plan(
@@ -618,6 +651,8 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                 "Return strict JSON only. Do not generate proposals, executable code, commands, or profiler invocations."
             ),
             user=payload,
+            context="plan-research-request",
+            timeout_sec=PLANNER_REQUEST_TIMEOUT_SEC,
         )
         research_request = _sanitize_research_request(
             out.get("research_request", {}),
@@ -628,6 +663,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             reason=str(out.get("reason", "")).strip(),
             research_request=research_request,
             planner=self.name,
+            raw_response=json.dumps(out, indent=2),
         )
 
     def plan_proposal(
@@ -652,33 +688,6 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             "max_iterations": max_iterations,
             "max_benchmarks": max_benchmarks,
             "research_memo": _trim_text(research_memo, 3000),
-            "output_schema": {
-                "reason": "str",
-                "proposal": {
-                    "intent_summary": "str",
-                    "proposal_summary": "str",
-                    "target_nodes": ["str"],
-                    "proposals": [
-                        {
-                            "id": "str",
-                            "title": "str",
-                            "objective": "str",
-                            "target_node_ids": ["str"],
-                            "priority": "high|medium|low",
-                            "benchmark_role": "baseline|isolation|sweep|interaction|stress|refinement|validation",
-                            "description": "str",
-                            "hypothesis": "str",
-                            "required_evidence": ["str"],
-                            "rationale": "str",
-                            "prerequisites": ["str"],
-                            "next_if_success": ["str"],
-                            "next_if_failure": ["str"],
-                        }
-                    ],
-                    "planner_notes": "str",
-                    "generated_at": "str",
-                },
-            },
         }
         payload = _enforce_payload_budget(
             payload,
@@ -686,22 +695,31 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             hard_cap_chars=PLANNER_INPUT_HARD_CAP_CHARS,
             trimmers=[_trim_planner_payload],
         )
-        out = self._json_completion(
+        user_prompt = _render_planner_proposal_prompt(payload)
+        memo = self._text_completion(
             system=(
-                "You are a planner agent for iterative performance-modeling workflows. Return strict JSON only. "
-                "Generate only a non-executable research proposal from the current knowledge model and available research. "
-                "Do not emit executable code, commands, profiler invocations, or a full knowledge model."
+                "You are a GPU performance-model planner. Answer briefly and directly in plain Markdown. "
+                "Do not output JSON. Do not output executable code, commands, or profiler invocations."
             ),
-            user=payload,
+            user=user_prompt,
+            context="planner-proposal",
+            timeout_sec=PLANNER_REQUEST_TIMEOUT_SEC,
         )
-        focus = _sanitize_dimensions(_proposal_focus_nodes(out.get("proposal", {})), [], max_benchmarks)
+        proposal = _proposal_from_memo(
+            memo,
+            intent=intent,
+            focus_nodes=_planner_focus_dimensions_from_kb(kb=kb, iteration=iteration, max_benchmarks=max_benchmarks),
+            iteration=iteration,
+        )
+        focus = _sanitize_dimensions(_proposal_focus_nodes(proposal), [], max_benchmarks)
         if not focus:
             focus = _planner_focus_dimensions_from_kb(kb=kb, iteration=iteration, max_benchmarks=max_benchmarks)
-        proposal = _sanitize_proposal(out.get("proposal", {}), intent=intent, focus_nodes=focus, iteration=iteration)
+        proposal = _sanitize_proposal(proposal, intent=intent, focus_nodes=focus, iteration=iteration)
         return ProposalPlanDecision(
-            reason=str(out.get("reason", "")).strip(),
+            reason=_proposal_reason_from_memo(memo),
             proposal=proposal,
             planner=self.name,
+            raw_response=memo,
         )
 
     def generate_implementation(
@@ -720,6 +738,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         benchmarks_raw: list[dict[str, Any]] = []
         reasons: list[str] = []
         amendments: list[dict[str, Any]] = []
+        raw_memos: list[str] = []
         for dim in focus:
             compact_plan = _compact_codegen_plan(plan=plan, dimension=dim)
             compact_kb = _compact_codegen_kb(kb=kb, dimension=dim)
@@ -730,32 +749,6 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                 "iteration": iteration,
                 "dimension": dim,
                 "proposal_memo": _trim_text(proposal_memo, 3000),
-                "output_schema": {
-                    "reason": "str",
-                    "benchmark": {
-                        "id": "str",
-                        "command": "str",
-                        "hypothesis": "str",
-                        "dimensions": ["str"],
-                        "analysis_method": {
-                            "summary": "str",
-                            "metrics": ["str"],
-                            "decision_logic": "str",
-                        },
-                        "scores": {
-                            "coverage_gain_score": "float(0..1)",
-                            "implementability_score": "float(0..1)",
-                            "observability_score": "float(0..1)",
-                            "rationale": "str",
-                        },
-                        "files": [
-                            {"path": "str(.md|.json|.cu)", "type": "md|json|cu", "content": "str"}
-                        ],
-                    },
-                    "contract_amendments": [
-                        {"path": "str", "change": "str", "rationale": "str", "priority": "low|medium|high"}
-                    ],
-                },
                 "constraints": {
                     "bounded_runtime": "Each command should complete in <= 45 seconds when possible.",
                     "safety": "No destructive commands, no system configuration mutation.",
@@ -768,20 +761,22 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                 hard_cap_chars=CODEGEN_INPUT_HARD_CAP_CHARS,
                 trimmers=[_trim_codegen_payload],
             )
-            out = self._json_completion(
-                system=(
-                    "You are a code-generation agent. Return strict JSON only. "
-                    "Generate exactly one concrete benchmark for the requested dimension. "
-                    "The benchmark implementation must be CUDA C++ source (.cu), and the command must compile and/or run it "
-                    "(for example with nvcc and executable invocation). Do not use Python benchmark scripts."
-                ),
-                user=payload,
+            user_prompt = _render_codegen_prompt(payload)
+            memo, bench, bench_amendments, repair_used = self._generate_benchmark_with_repair(
+                intent=intent,
+                dimension=dim,
+                iteration=iteration,
+                benchmark_index=len(benchmarks_raw),
+                proposal=compact_plan.get("proposal", {}),
+                user_prompt=user_prompt,
             )
-            reasons.append(str(out.get("reason", "")))
-            bench = out.get("benchmark", {})
-            if isinstance(bench, dict):
-                benchmarks_raw.append(bench)
-            amendments.extend(_sanitize_amendments(out.get("contract_amendments", [])))
+            raw_memos.append(memo)
+            reason = _codegen_reason_from_memo(memo)
+            if repair_used:
+                reason = f"{reason} [repair_attempt_used]"
+            reasons.append(reason)
+            benchmarks_raw.append(bench)
+            amendments.extend(bench_amendments)
         benches = _sanitize_benchmarks(
             benchmarks_raw,
             target_dimensions=kb.get("target_dimensions", []),
@@ -796,7 +791,64 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             negotiation={"accepted": [], "rejected": [], "policy": _policy_from_contract(kb.get("schema_contract", {}))},
             contract_amendments=amendments,
             planner=self.name,
+            raw_response="\n\n---\n\n".join([m for m in raw_memos if str(m).strip()]),
         )
+
+    def _generate_benchmark_with_repair(
+        self,
+        *,
+        intent: str,
+        dimension: str,
+        iteration: int,
+        benchmark_index: int,
+        proposal: dict[str, Any],
+        user_prompt: str,
+    ) -> tuple[str, dict[str, Any], list[dict[str, Any]], bool]:
+        memo = self._text_completion(
+            system=CODEGEN_SYSTEM_PROMPT,
+            user=user_prompt,
+            max_output_tokens=None,
+            timeout_sec=CODEGEN_TIMEOUT_SEC,
+            context="codegen-memo",
+        )
+        bench, amendments = _benchmark_from_memo(
+            memo,
+            intent=intent,
+            dimension=dimension,
+            iteration=iteration,
+            benchmark_index=benchmark_index,
+            proposal=proposal,
+        )
+        repair_used = False
+        for _ in range(CODEGEN_REPAIR_ATTEMPTS):
+            if _benchmark_is_codegen_ready(bench):
+                break
+            repair_used = True
+            repaired_memo = self._text_completion(
+                system=CODEGEN_SYSTEM_PROMPT,
+                user=_render_codegen_repair_prompt(
+                    original_prompt=user_prompt,
+                    previous_memo=memo,
+                    amendments=amendments,
+                ),
+                max_output_tokens=None,
+                timeout_sec=CODEGEN_TIMEOUT_SEC,
+                context="codegen-memo",
+            )
+            memo = (
+                f"{memo.strip()}\n\n--- CODEGEN REPAIR ATTEMPT ---\n\n{repaired_memo.strip()}"
+                if str(memo).strip()
+                else repaired_memo
+            )
+            bench, amendments = _benchmark_from_memo(
+                repaired_memo,
+                intent=intent,
+                dimension=dimension,
+                iteration=iteration,
+                benchmark_index=benchmark_index,
+                proposal=proposal,
+            )
+        return memo, bench, amendments, repair_used
 
     def analyze_results(
         self,
@@ -841,6 +893,8 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                 "Return strict JSON only. Only claim coverage for successful non-skipped runs."
             ),
             user=payload,
+            context="analysis-json",
+            timeout_sec=ANALYSIS_TIMEOUT_SEC,
         )
         claims = out.get("claims", [])
         if not isinstance(claims, list):
@@ -861,14 +915,23 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             planner=self.name,
         )
 
-    def _json_completion(self, system: str, user: dict[str, Any], tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def _json_completion(
+        self,
+        system: str,
+        user: dict[str, Any],
+        tools: list[dict[str, Any]] | None = None,
+        context: str = "completion",
+        timeout_sec: float | None = None,
+    ) -> dict[str, Any]:
         try:
             from openai import OpenAI
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("OpenAI workflow backend requires `openai` package.") from exc
 
         api_key = _normalized_api_key()
-        client = OpenAI(api_key=api_key or None, timeout=self.request_timeout_sec)
+        effective_timeout = max(self.request_timeout_sec, float(timeout_sec or self.request_timeout_sec))
+        robust_timeout = _robust_response_threshold(context, effective_timeout)
+        client = OpenAI(api_key=api_key or None, timeout=robust_timeout)
         request: dict[str, Any] = {
             "model": self.model,
             "max_output_tokens": 2600,
@@ -883,7 +946,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         parse_error: Exception | None = None
         raw_text = ""
         for _ in range(2):
-            resp = self._responses_create(client, request, context="completion")
+            resp = self._responses_create(client, request, context=context, timeout_sec=robust_timeout)
             raw_text = (resp.output_text or "").strip()
             try:
                 return _parse_json_object(raw_text)
@@ -895,6 +958,38 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                 except Exception as exc2:  # noqa: BLE001
                     parse_error = exc2
         raise ValueError(f"Failed to parse JSON response: {parse_error}; text_prefix={raw_text[:180]}")
+
+    def _text_completion(
+        self,
+        system: str,
+        user: str,
+        tools: list[dict[str, Any]] | None = None,
+        max_output_tokens: int | None = 900,
+        timeout_sec: float | None = None,
+        context: str = "completion",
+    ) -> str:
+        try:
+            from openai import OpenAI
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("OpenAI workflow backend requires `openai` package.") from exc
+
+        api_key = _normalized_api_key()
+        effective_timeout = max(self.request_timeout_sec, float(timeout_sec or self.request_timeout_sec))
+        robust_timeout = _robust_response_threshold(context, effective_timeout)
+        client = OpenAI(api_key=api_key or None, timeout=robust_timeout)
+        request: dict[str, Any] = {
+            "model": self.model,
+            "input": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        if max_output_tokens is not None:
+            request["max_output_tokens"] = max(64, int(max_output_tokens))
+        if tools:
+            request["tools"] = tools
+        resp = self._responses_create(client, request, context=context, timeout_sec=robust_timeout)
+        return (resp.output_text or "").strip()
 
     def _repair_json(self, client: Any, malformed: str, schema_hint: dict[str, Any]) -> str:
         repair = self._responses_create(
@@ -925,12 +1020,23 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         )
         return (repair.output_text or "").strip()
 
-    def _responses_create(self, client: Any, request: dict[str, Any], context: str) -> Any:
-        return self._run_with_timeout(
-            lambda: client.responses.create(**request),
-            timeout_sec=self.request_timeout_sec + 5.0,
-            context=context,
-        )
+    def _responses_create(self, client: Any, request: dict[str, Any], context: str, timeout_sec: float | None = None) -> Any:
+        effective_timeout = timeout_sec if timeout_sec is not None else self.request_timeout_sec + 5.0
+        try:
+            return self._run_with_timeout(
+                lambda: client.responses.create(**request),
+                timeout_sec=effective_timeout,
+                context=context,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, TimeoutError):
+                raise
+            if _is_retryable_openai_exception(exc):
+                raise TimeoutError(
+                    f"OpenAI {context} failed during a single long-running request "
+                    f"(timeout budget {effective_timeout:.1f}s): {exc}"
+                ) from exc
+            raise
 
     def _run_with_timeout(self, fn: Any, timeout_sec: float, context: str) -> Any:
         timeout_sec = max(1.0, float(timeout_sec))
@@ -954,6 +1060,13 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
     def __init__(self, primary: LLMWorkflowBackend, fallback: LLMWorkflowBackend) -> None:
         self.primary = primary
         self.fallback = fallback
+        if isinstance(primary, OpenAIWorkflowBackend):
+            self.research_timeout_retries = 0
+            self.analysis_timeout_retries = 0
+        else:
+            self.research_timeout_retries = 1
+            self.analysis_timeout_retries = 1
+        self.timeout_diagnostics_enabled = os.getenv("GPU_PROFILER_TIMEOUT_DIAGNOSTICS", "1") != "0"
 
     def negotiate_schema(
         self,
@@ -1029,9 +1142,21 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
         max_sources: int = 8,
     ) -> ResearchDecision:
         try:
-            return self._call_primary(
-                "research_context", intent, kb, iteration, research_request, research_request_memo, max_sources
+            result, retry_count = self._call_primary_with_retries(
+                "research_context",
+                intent,
+                kb,
+                iteration,
+                research_request,
+                research_request_memo,
+                max_sources,
+                retries=self.research_timeout_retries,
             )
+            if retry_count:
+                result.reason = (
+                    f"Primary research succeeded after {retry_count} timeout retry attempt(s). {result.reason}"
+                )
+            return result
         except Exception as exc:  # noqa: BLE001
             alt = self.fallback.research_context(intent, kb, iteration, research_request, research_request_memo, max_sources)
             alt.reason = f"Primary research failed ({exc}); fallback used. {alt.reason}"
@@ -1065,7 +1190,7 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
         max_iterations: int,
     ) -> AnalysisDecision:
         try:
-            return self._call_primary(
+            result, retry_count = self._call_primary_with_retries(
                 "analyze_results",
                 intent,
                 kb,
@@ -1073,7 +1198,13 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
                 execution_results,
                 iteration,
                 max_iterations,
+                retries=self.analysis_timeout_retries,
             )
+            if retry_count:
+                result.reason = (
+                    f"Primary analysis succeeded after {retry_count} timeout retry attempt(s). {result.reason}"
+                )
+            return result
         except Exception as exc:  # noqa: BLE001
             alt = self.fallback.analyze_results(intent, kb, plan, execution_results, iteration, max_iterations)
             alt.reason = f"Primary analysis failed ({exc}); fallback used. {alt.reason}"
@@ -1081,7 +1212,7 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
             return alt
 
     def _call_primary(self, method_name: str, *args: Any) -> Any:
-        timeout_sec = self._primary_timeout_sec()
+        timeout_sec = self._primary_timeout_sec(method_name)
         if timeout_sec <= 0:
             return getattr(self.primary, method_name)(*args)
 
@@ -1107,7 +1238,81 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
             )
         raise RuntimeError(f"Primary backend {getattr(self.primary, 'name', 'primary')}:{method_name} returned no result")
 
-    def _primary_timeout_sec(self) -> float:
+    def _call_primary_with_retries(
+        self,
+        method_name: str,
+        *args: Any,
+        retries: int = 0,
+    ) -> tuple[Any, int]:
+        effective_retries = max(0, int(retries))
+        retry_count = 0
+        last_exc: Exception | None = None
+        while True:
+            try:
+                return self._call_primary(method_name, *args), retry_count
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if retry_count >= effective_retries or not self._is_retryable_timeout(exc):
+                    self._emit_timeout_progress(method_name, retry_count, effective_retries, exc, final=True)
+                    self._launch_timeout_diagnostic(method_name, args, exc)
+                    break
+                self._emit_timeout_progress(method_name, retry_count, effective_retries, exc, final=False)
+                retry_count += 1
+        if retry_count and last_exc is not None:
+            raise RuntimeError(
+                f"{last_exc}; timeout retry exhausted after {retry_count} additional attempt(s)"
+            ) from last_exc
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(
+            f"Primary backend {getattr(self.primary, 'name', 'primary')}:{method_name} failed without a captured error"
+        )
+
+    def _emit_timeout_progress(
+        self,
+        method_name: str,
+        retry_count: int,
+        retries: int,
+        exc: Exception,
+        *,
+        final: bool,
+    ) -> None:
+        sender = _method_timeout_sender(method_name)
+        if not sender:
+            return
+        total_attempts = retries + 1
+        if final:
+            message = (
+                f"OpenAI {method_name} timed out after attempt {retry_count + 1}/{total_attempts}. "
+                f"Falling back. Detail: {exc}"
+            )
+        else:
+            message = (
+                f"OpenAI {method_name} timed out after attempt {retry_count + 1}/{total_attempts}. "
+                f"Retrying now. Detail: {exc}"
+            )
+        _emit_live_agent_status(sender=sender, recipient="orchestrator", message=message)
+
+    def _is_retryable_timeout(self, exc: Exception) -> bool:
+        if isinstance(exc, TimeoutError):
+            return True
+        message = f"{exc.__class__.__name__}: {exc}".lower()
+        return "timed out" in message or "timeout" in message
+
+    def _launch_timeout_diagnostic(self, method_name: str, args: tuple[Any, ...], exc: Exception) -> None:
+        if not self.timeout_diagnostics_enabled or not self._is_retryable_timeout(exc):
+            return
+        try:
+            _launch_openai_timeout_diagnostic(
+                primary=self.primary,
+                method_name=method_name,
+                args=args,
+                exc=exc,
+            )
+        except Exception:
+            return
+
+    def _primary_timeout_sec(self, method_name: str) -> float:
         raw = getattr(self.primary, "request_timeout_sec", 0.0)
         try:
             timeout_sec = float(raw)
@@ -1115,7 +1320,24 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
             return 0.0
         if timeout_sec <= 0:
             return 0.0
-        return max(2.0, timeout_sec + 2.0)
+        if not isinstance(self.primary, OpenAIWorkflowBackend):
+            if method_name == "generate_implementation":
+                return max(CODEGEN_TIMEOUT_SEC + 15.0, timeout_sec + 62.0)
+            return max(2.0, timeout_sec + 2.0)
+        if method_name == "generate_implementation":
+            attempt_timeout = max(CODEGEN_TIMEOUT_SEC + 5.0, timeout_sec + 5.0)
+            return _robust_response_threshold("codegen-memo", attempt_timeout) + 5.0
+        if method_name == "propose_plan":
+            attempt_timeout = max(5.0, timeout_sec + 5.0)
+            return _robust_response_threshold("planner-proposal", attempt_timeout) + 5.0
+        if method_name == "research_context":
+            attempt_timeout = max(RESEARCH_TIMEOUT_SEC + 5.0, timeout_sec + 5.0)
+            return _robust_response_threshold("research-context", attempt_timeout) + 5.0
+        if method_name == "analyze_results":
+            attempt_timeout = max(ANALYSIS_TIMEOUT_SEC + 5.0, timeout_sec + 5.0)
+            return _robust_response_threshold("analysis-json", attempt_timeout) + 5.0
+        attempt_timeout = max(5.0, timeout_sec + 5.0)
+        return _robust_response_threshold(_method_timeout_context(method_name), attempt_timeout) + 5.0
 
 
 def _invoke_backend_method(backend: Any, method_name: str, args: tuple[Any, ...], queue: Any) -> None:
@@ -1128,6 +1350,249 @@ def _invoke_backend_method(backend: Any, method_name: str, args: tuple[Any, ...]
 
 def _normalized_api_key() -> str:
     return "".join(os.getenv("OPENAI_API_KEY", "").split())
+
+
+def _launch_openai_timeout_diagnostic(
+    primary: Any,
+    method_name: str,
+    args: tuple[Any, ...],
+    exc: Exception,
+) -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    diag_root = repo_root / "openai_timeout_diagnostics"
+    run_dir = diag_root / f"{time.strftime('%Y%m%d-%H%M%S')}-{method_name}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = _timeout_diagnostic_payload(method_name, args)
+    event = {
+        "method_name": method_name,
+        "model": str(getattr(primary, "model", "")),
+        "primary_name": str(getattr(primary, "name", "primary")),
+        "request_timeout_sec": float(getattr(primary, "request_timeout_sec", 0.0) or 0.0),
+        "exception_type": exc.__class__.__name__,
+        "exception": str(exc),
+        "payload": payload,
+        "launched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    (run_dir / "event.json").write_text(json.dumps(event, indent=2), encoding="utf-8")
+
+    ping_script = repo_root / "openai_ping.py"
+    if ping_script.exists():
+        ping_cmd = [
+            sys.executable,
+            str(ping_script),
+            "--model",
+            str(getattr(primary, "model", "gpt-5.4")),
+            "--timeout",
+            str(max(5.0, float(getattr(primary, "request_timeout_sec", 0.0) or 0.0))),
+            "--retries",
+            "1",
+            "--message",
+            f"Reply in one sentence. This is a timeout diagnostic for {method_name}.",
+        ]
+        _spawn_background_command(
+            ping_cmd,
+            cwd=repo_root,
+            stdout_path=run_dir / "openai_ping.stdout.txt",
+            stderr_path=run_dir / "openai_ping.stderr.txt",
+            env=_diagnostic_environment(primary),
+        )
+
+    probe_script = repo_root / "openai_agent_probe.py"
+    query = str(payload.get("query", "")).strip()
+    if probe_script.exists() and query and method_name in {
+        "plan_research_request",
+        "research_context",
+        "plan_proposal",
+        "generate_implementation",
+        "analyze_results",
+    }:
+        base_timeout = float(getattr(primary, "request_timeout_sec", 0.0) or 0.0)
+        if method_name == "research_context":
+            base_timeout = max(RESEARCH_TIMEOUT_SEC, base_timeout)
+        elif method_name == "analyze_results":
+            base_timeout = max(ANALYSIS_TIMEOUT_SEC, base_timeout)
+        else:
+            base_timeout = max(15.0, base_timeout)
+        probe_cmd = [
+            sys.executable,
+            str(probe_script),
+            "--model",
+            str(getattr(primary, "model", "gpt-5.4")),
+            "--agent",
+            method_name,
+            "--timeout-value",
+            str(base_timeout),
+            "--timeout-value",
+            str(base_timeout + 15.0),
+            "--query",
+            query,
+            "--control-query",
+            "How should I characterize latency and result quality for this OpenAI-backed GPU profiling agent call?",
+            "--out",
+            str(run_dir / "agent_probe_runs"),
+        ]
+        _spawn_background_command(
+            probe_cmd,
+            cwd=repo_root,
+            stdout_path=run_dir / "agent_probe.stdout.txt",
+            stderr_path=run_dir / "agent_probe.stderr.txt",
+            env=_diagnostic_environment(primary),
+        )
+
+
+def _spawn_background_command(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    env: dict[str, str] | None = None,
+) -> None:
+    stdout_handle = stdout_path.open("w", encoding="utf-8")
+    stderr_handle = stderr_path.open("w", encoding="utf-8")
+    try:
+        subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            start_new_session=True,
+            env=env,
+        )
+    finally:
+        stdout_handle.close()
+        stderr_handle.close()
+
+
+def _diagnostic_environment(primary: Any) -> dict[str, str]:
+    env = {str(k): str(v) for k, v in os.environ.items()}
+    api_key = _normalized_api_key()
+    if api_key:
+        env["OPENAI_API_KEY"] = api_key
+    model = str(getattr(primary, "model", "")).strip()
+    if model:
+        env.setdefault("GPU_PROFILER_OPENAI_MODEL", model)
+    return env
+
+
+def _timeout_diagnostic_payload(method_name: str, args: tuple[Any, ...]) -> dict[str, Any]:
+    payload: dict[str, Any] = {"method_name": method_name}
+    if method_name == "research_context":
+        request = args[3] if len(args) > 3 and isinstance(args[3], dict) else {}
+        memo = str(args[4]).strip() if len(args) > 4 else ""
+        payload["intent"] = str(args[0]).strip() if args else ""
+        payload["iteration"] = int(args[2]) if len(args) > 2 else 0
+        payload["query"] = (
+            memo
+            or str(request.get("request_summary", "")).strip()
+            or next((str(x).strip() for x in request.get("target_questions", []) if str(x).strip()), "")
+        )
+        payload["target_questions"] = [str(x).strip() for x in request.get("target_questions", []) if str(x).strip()]
+        payload["max_sources"] = int(args[5]) if len(args) > 5 else 0
+        return payload
+    if method_name == "plan_research_request":
+        payload["intent"] = str(args[0]).strip() if args else ""
+        payload["query"] = payload["intent"]
+        payload["iteration"] = int(args[2]) if len(args) > 2 else 0
+        return payload
+    if method_name == "plan_proposal":
+        payload["intent"] = str(args[0]).strip() if args else ""
+        payload["iteration"] = int(args[2]) if len(args) > 2 else 0
+        payload["query"] = str(args[5]).strip() if len(args) > 5 and str(args[5]).strip() else payload["intent"]
+        return payload
+    if method_name == "generate_implementation":
+        payload["intent"] = str(args[0]).strip() if args else ""
+        plan = args[2] if len(args) > 2 and isinstance(args[2], dict) else {}
+        proposal = plan.get("proposal", {}) if isinstance(plan.get("proposal", {}), dict) else {}
+        first_proposal = proposal.get("proposals", [None])[0] if isinstance(proposal.get("proposals", []), list) else None
+        payload["query"] = str(args[5]).strip() if len(args) > 5 and str(args[5]).strip() else ""
+        if not payload["query"] and isinstance(first_proposal, dict):
+            payload["query"] = str(first_proposal.get("title", "")).strip() or str(first_proposal.get("objective", "")).strip()
+        if not payload["query"]:
+            payload["query"] = payload["intent"]
+        payload["iteration"] = int(args[3]) if len(args) > 3 else 0
+        return payload
+    if method_name == "analyze_results":
+        payload["intent"] = str(args[0]).strip() if args else ""
+        payload["query"] = payload["intent"]
+        payload["iteration"] = int(args[4]) if len(args) > 4 else 0
+        return payload
+    payload["arg_types"] = [type(item).__name__ for item in args]
+    payload["payload_bytes"] = len(json.dumps([_json_safe(item) for item in args]))
+    return payload
+
+
+def _json_safe(value: Any) -> Any:
+    try:
+        json.dumps(value)
+        return value
+    except Exception:
+        return str(value)
+
+
+def _method_timeout_context(method_name: str) -> str:
+    mapping = {
+        "negotiate_schema": "schema-contract",
+        "plan_research_request": "plan-research-request",
+        "plan_proposal": "planner-proposal",
+        "research_context": "research-context",
+        "generate_implementation": "codegen-memo",
+        "analyze_results": "analysis-json",
+    }
+    return mapping.get(method_name, "completion")
+
+
+def _method_timeout_sender(method_name: str) -> str:
+    mapping = {
+        "plan_research_request": "llm-planner",
+        "plan_proposal": "llm-planner",
+        "research_context": "llm-research",
+        "generate_implementation": "llm-codegen",
+        "analyze_results": "llm-analysis",
+    }
+    return mapping.get(method_name, "")
+
+
+def _emit_live_agent_status(sender: str, recipient: str, message: str) -> None:
+    if not sender or not recipient or not str(message).strip():
+        return
+    stream = sys.stdout if getattr(sys.stdout, "isatty", lambda: False)() else sys.stderr
+    print(f"{sender} -> {recipient}: message: {message}", file=stream, flush=True)
+
+
+def _robust_response_threshold(context: str, attempt_timeout_sec: float) -> float:
+    floor = OPENAI_RESPONSE_DEFAULT_THRESHOLD_SEC
+    if context == "research-context":
+        floor = OPENAI_RESPONSE_RESEARCH_THRESHOLD_SEC
+    elif context == "analysis-json":
+        floor = OPENAI_RESPONSE_ANALYSIS_THRESHOLD_SEC
+    elif context == "codegen-memo":
+        floor = OPENAI_RESPONSE_CODEGEN_THRESHOLD_SEC
+    return max(float(floor), float(attempt_timeout_sec) * OPENAI_RESPONSE_ROBUST_THRESHOLD_MULTIPLIER)
+
+
+def _is_retryable_openai_exception(exc: Exception) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    name = exc.__class__.__name__.lower()
+    message = str(exc).lower()
+    if "timeout" in message or "timed out" in message:
+        return True
+    retryable_names = {"apiconnectionerror", "internalservererror", "ratelimiterror"}
+    if name in retryable_names:
+        return True
+    retryable_signals = [
+        "connection reset",
+        "temporarily unavailable",
+        "server error",
+        "rate limit",
+        "429",
+        "502",
+        "503",
+        "504",
+    ]
+    return any(signal_text in message for signal_text in retryable_signals)
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
@@ -1321,6 +1786,91 @@ def _compact_research_request(request: dict[str, Any]) -> dict[str, Any]:
         "source_preferences": [str(x).strip() for x in request.get("source_preferences", []) if str(x).strip()][:6],
         "expected_outputs": [str(x).strip() for x in request.get("expected_outputs", []) if str(x).strip()][:6],
     }
+
+
+def _render_planner_proposal_prompt(payload: dict[str, Any]) -> str:
+    kb = payload.get("knowledge_base", {}) if isinstance(payload.get("knowledge_base", {}), dict) else {}
+    model = kb.get("current_knowledge_model", {}) if isinstance(kb.get("current_knowledge_model", {}), dict) else {}
+    tools = ", ".join(sorted(str(k) for k, v in (kb.get("available_tools", {}) or {}).items() if v)) or "none"
+    focus_nodes = ", ".join(str(x) for x in model.get("focus_nodes", []) if str(x).strip()) or "none yet"
+    covered = ", ".join(str(x) for x in kb.get("covered_dimensions", []) if str(x).strip()) or "none yet"
+    research_memo = str(payload.get("research_memo", "")).strip() or "No external findings yet."
+    return (
+        f"Intent: {payload.get('intent', '')}\n"
+        f"Iteration: {payload.get('iteration', 0)} of {payload.get('max_iterations', 1)}\n"
+        f"Available tools: {tools}\n"
+        f"Current focus nodes: {focus_nodes}\n"
+        f"Covered dimensions so far: {covered}\n\n"
+        f"Research memo:\n{research_memo}\n\n"
+        "Task: Propose the single best next benchmark proposal memo.\n"
+        "Requirements:\n"
+        "- non-executable\n"
+        "- one benchmark only\n"
+        "- domain-specific\n"
+        "- precise\n"
+        "- concise\n"
+        "- curriculum-first\n"
+        "Output sections exactly:\n"
+        "1. Target Dimension\n"
+        "2. Why This First\n"
+        "3. Benchmark Idea\n"
+        "4. Required Evidence\n"
+        "5. What Success Unlocks\n"
+    )
+
+
+def _render_codegen_prompt(payload: dict[str, Any]) -> str:
+    kb = payload.get("knowledge_base", {}) if isinstance(payload.get("knowledge_base", {}), dict) else {}
+    plan = payload.get("plan", {}) if isinstance(payload.get("plan", {}), dict) else {}
+    proposal = plan.get("proposal", {}) if isinstance(plan.get("proposal", {}), dict) else {}
+    proposal_items = proposal.get("proposals", []) if isinstance(proposal.get("proposals", []), list) else []
+    item = proposal_items[0] if proposal_items else {}
+    tools = ", ".join(sorted(str(k) for k, v in (kb.get("available_tools", {}) or {}).items() if v)) or "none"
+    relevant_nodes = kb.get("relevant_knowledge_nodes", []) if isinstance(kb.get("relevant_knowledge_nodes", []), list) else []
+    node_summary = "\n".join(
+        f"- {str(node.get('name', '')).strip()}: {str(node.get('description', '')).strip()}"
+        for node in relevant_nodes
+        if isinstance(node, dict) and str(node.get("name", "")).strip()
+    ) or "- none"
+    return (
+        f"Intent: {payload.get('intent', '')}\n"
+        f"Iteration: {payload.get('iteration', 0)}\n"
+        f"Target dimension: {payload.get('dimension', '')}\n"
+        f"Available tools: {tools}\n\n"
+        "Relevant knowledge:\n"
+        f"{node_summary}\n\n"
+        "Proposal memo:\n"
+        f"{str(payload.get('proposal_memo', '')).strip() or 'No proposal memo provided.'}\n\n"
+        "Relevant proposal item:\n"
+        f"- title: {str(item.get('title', '')).strip()}\n"
+        f"- objective: {str(item.get('objective', '')).strip()}\n"
+        f"- benchmark role: {str(item.get('benchmark_role', '')).strip()}\n"
+        f"- required evidence: {', '.join(str(x) for x in item.get('required_evidence', []) if str(x).strip()) or 'none specified'}\n"
+        f"- rationale: {str(item.get('rationale', '')).strip()}\n\n"
+        "Task: Write a concise implementation memo for exactly one CUDA benchmark.\n"
+        "Requirements:\n"
+        "- domain-specific\n"
+        "- precise\n"
+        "- concise\n"
+        "- one CUDA source file only\n"
+        "- one shell command only\n"
+        "- bounded runtime when possible\n"
+        "- no Python benchmark scripts\n"
+        "Output sections exactly:\n"
+        "1. Implementation Summary\n"
+        "2. CUDA Source File\n"
+        "3. Build and Run Command\n"
+        "4. Validation Checks\n"
+        "5. Feasibility and Risks\n"
+        "\n"
+        "In section 2, include:\n"
+        "Path: <relative path ending in .cu>\n"
+        "then one fenced ```cuda code block.\n"
+        "In section 3, include one fenced ```bash code block with the command.\n"
+        "In section 5, include lines starting with:\n"
+        "- Feasibility: feasible|feasible_with_revision|not_feasible\n"
+        "- Complexity: low|medium|high|excessive\n"
+    )
 
 
 def _compact_codegen_kb(kb: dict[str, Any], dimension: str) -> dict[str, Any]:
@@ -1672,6 +2222,187 @@ def _sanitize_proposal(raw: dict[str, Any], intent: str, focus_nodes: list[str],
     }
 
 
+def _proposal_reason_from_memo(memo: str) -> str:
+    section = _extract_numbered_section(memo, "Why This First")
+    return section or "Planner produced proposal memo."
+
+
+def _codegen_reason_from_memo(memo: str) -> str:
+    section = _extract_numbered_section(memo, "Implementation Summary")
+    return _first_nonempty_line(section) or "Code generator produced implementation memo."
+
+
+def _proposal_from_memo(memo: str, intent: str, focus_nodes: list[str], iteration: int) -> dict[str, Any]:
+    target_dimension = _first_nonempty_line(_extract_numbered_section(memo, "Target Dimension"))
+    why_first = _extract_numbered_section(memo, "Why This First")
+    benchmark_idea = _extract_numbered_section(memo, "Benchmark Idea")
+    required_evidence = _extract_bullets_or_lines(_extract_numbered_section(memo, "Required Evidence"))
+    success_unlocks = _extract_bullets_or_lines(_extract_numbered_section(memo, "What Success Unlocks"))
+    if not target_dimension:
+        return _default_proposal(intent=intent, focus_dimensions=focus_nodes, iteration=iteration)
+    target_node = _slugify_dimension(target_dimension) or (focus_nodes[0] if focus_nodes else f"feature_{iteration}")
+    return {
+        "intent_summary": intent,
+        "proposal_summary": benchmark_idea or f"Initial benchmark proposal for {target_dimension}.",
+        "target_nodes": [target_node],
+        "proposals": [
+            {
+                "id": f"proposal_{iteration}_0",
+                "title": f"Baseline benchmark for {target_dimension}",
+                "objective": benchmark_idea or f"Establish first evidence for {target_dimension}.",
+                "target_node_ids": [target_node],
+                "priority": "high",
+                "benchmark_role": "baseline",
+                "description": benchmark_idea,
+                "hypothesis": why_first,
+                "required_evidence": required_evidence,
+                "rationale": why_first,
+                "prerequisites": [],
+                "next_if_success": success_unlocks,
+                "next_if_failure": [f"Simplify or clarify the benchmark design for {target_dimension}."],
+            }
+        ],
+        "planner_notes": _trim_text(memo, 1200),
+        "generated_at": "",
+    }
+
+
+def _benchmark_from_memo(
+    memo: str,
+    intent: str,
+    dimension: str,
+    iteration: int,
+    benchmark_index: int,
+    proposal: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    _ = intent
+    proposal_items = proposal.get("proposals", []) if isinstance(proposal.get("proposals", []), list) else []
+    item = proposal_items[0] if proposal_items else {}
+    summary = _extract_numbered_section(memo, "Implementation Summary")
+    source_section = _extract_numbered_section(memo, "CUDA Source File")
+    command_section = _extract_numbered_section(memo, "Build and Run Command")
+    validation_section = _extract_numbered_section(memo, "Validation Checks")
+    feasibility_section = _extract_numbered_section(memo, "Feasibility and Risks")
+
+    source_path = _extract_labeled_value(source_section, "Path") or f"generated/iter_{iteration:02d}/benchmark_{benchmark_index:02d}.cu"
+    if not source_path.endswith(".cu"):
+        source_path = f"generated/iter_{iteration:02d}/benchmark_{benchmark_index:02d}.cu"
+    truncated_source = _has_unclosed_code_fence(source_section)
+    source_code = _extract_first_code_block(source_section, preferred_langs=("cuda", "cpp", "c++", "c"))
+    source_missing = not bool(source_code)
+    command = _extract_first_code_block(command_section, preferred_langs=("bash", "sh", "shell"))
+    if not command:
+        binary_path = f"./generated/iter_{iteration:02d}/benchmark_{benchmark_index:02d}"
+        command = f"nvcc -O3 {source_path} -o {binary_path} && {binary_path}"
+    command = " ".join(command.split())
+
+    validation_checks = _extract_bullets_or_lines(validation_section)
+    feasibility = _extract_labeled_value(feasibility_section, "Feasibility").lower()
+    complexity = _extract_labeled_value(feasibility_section, "Complexity").lower()
+    if feasibility not in {"feasible", "feasible_with_revision", "not_feasible"}:
+        feasibility = "feasible"
+    if complexity not in {"low", "medium", "high", "excessive"}:
+        complexity = "medium"
+    risks = _extract_remaining_lines(
+        feasibility_section,
+        exclude_prefixes=("Feasibility:", "Complexity:", "Risks:", "- Feasibility:", "- Complexity:", "- Risks:"),
+    )
+
+    amendment_list = []
+    if truncated_source or source_missing:
+        feasibility = "not_feasible"
+        complexity = "excessive" if truncated_source else ("high" if complexity in {"low", "medium"} else complexity)
+        amendment_list.append(
+            {
+                "path": "implementation.cuda_source",
+                "change": "Return one complete fenced CUDA code block in section 2 and ensure the file is not truncated.",
+                "rationale": "The codegen response did not include a complete CUDA source block." if truncated_source else "The codegen response did not include a CUDA source block.",
+                "priority": "high",
+            }
+        )
+    if feasibility in {"feasible_with_revision", "not_feasible"} or complexity in {"high", "excessive"}:
+        amendment_list.append(
+            {
+                "path": "proposal.proposals[0]",
+                "change": "Clarify or simplify the implementation scope before the next codegen attempt.",
+                "rationale": "; ".join(risks) if risks else f"Implementation memo reported {feasibility} with {complexity} complexity.",
+                "priority": "high" if feasibility == "not_feasible" or complexity == "excessive" else "medium",
+            }
+        )
+
+    benchmark_id = str(item.get("id", "")).strip() or f"proposal_{iteration}_{benchmark_index}"
+    title = str(item.get("title", "")).strip() or f"Benchmark for {dimension}"
+    hypothesis = str(item.get("hypothesis", "")).strip() or _first_nonempty_line(summary) or title
+    analysis_method = {
+        "summary": _first_nonempty_line(summary) or "Validate the benchmark run and inspect emitted evidence.",
+        "metrics": validation_checks[:6] or ["stdout-reported throughput", "runtime_sec"],
+        "decision_logic": "; ".join(validation_checks[:4]) or "Use successful build/run plus reported measurements to judge benchmark validity.",
+    }
+    scores = _scores_from_codegen_assessment(feasibility=feasibility, complexity=complexity, validation_checks=validation_checks)
+    benchmark = {
+        "id": benchmark_id,
+        "command": "" if truncated_source or source_missing else command,
+        "hypothesis": hypothesis,
+        "dimensions": [dimension],
+        "analysis_method": analysis_method,
+        "scores": scores,
+        "files": []
+        if truncated_source or source_missing
+        else [
+            {
+                "path": source_path,
+                "type": "cu",
+                "content": source_code,
+            }
+        ],
+    }
+    return benchmark, amendment_list
+
+
+def _benchmark_is_codegen_ready(benchmark: dict[str, Any]) -> bool:
+    if not isinstance(benchmark, dict):
+        return False
+    command = str(benchmark.get("command", "")).strip()
+    files = benchmark.get("files", [])
+    return bool(command) and _has_cuda_source(_sanitize_files(files)) and _is_cuda_build_or_run_command(command)
+
+
+def _render_codegen_repair_prompt(
+    *,
+    original_prompt: str,
+    previous_memo: str,
+    amendments: list[dict[str, Any]],
+) -> str:
+    fixes = []
+    for item in amendments:
+        if not isinstance(item, dict):
+            continue
+        change = str(item.get("change", "")).strip()
+        rationale = str(item.get("rationale", "")).strip()
+        if change and rationale:
+            fixes.append(f"- {change} Reason: {rationale}")
+        elif change:
+            fixes.append(f"- {change}")
+    if not fixes:
+        fixes.append("- Return one complete five-section implementation memo with a fenced CUDA source block and a runnable nvcc command.")
+    return "\n".join(
+        [
+            "Your previous implementation memo could not be converted into a runnable benchmark.",
+            "Return one corrected implementation memo in the exact same five-section Markdown format.",
+            "Do not summarize. Do not omit section 2 or section 3. Output the full corrected memo only.",
+            "",
+            "Fix these issues:",
+            *fixes[:6],
+            "",
+            "Original task:",
+            _trim_text(original_prompt, 4000),
+            "",
+            "Previous memo to repair:",
+            _trim_text(previous_memo, 5000),
+        ]
+    ).strip()
+
+
 def _sanitize_research_request(raw: dict[str, Any], intent: str, proposal: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         raw = {}
@@ -1712,6 +2443,79 @@ def _proposal_focus_nodes(proposal: dict[str, Any]) -> list[str]:
             if node and node not in out:
                 out.append(node)
     return out
+
+
+def _extract_numbered_section(text: str, title: str) -> str:
+    pattern = re.compile(
+        rf"(?ims)^\s*(?:#+\s*)?\d+\.\s*{re.escape(title)}\s*$\n(?P<body>.*?)(?=^\s*(?:#+\s*)?\d+\.\s*[^\n]+\s*$|\Z)"
+    )
+    match = pattern.search(text or "")
+    return match.group("body").strip() if match else ""
+
+
+def _first_nonempty_line(text: str) -> str:
+    for line in str(text or "").splitlines():
+        clean = line.strip().lstrip("-*").strip()
+        if clean:
+            return clean
+    return ""
+
+
+def _extract_bullets_or_lines(text: str) -> list[str]:
+    out: list[str] = []
+    for line in str(text or "").splitlines():
+        clean = line.strip()
+        if not clean:
+            continue
+        clean = clean.lstrip("-*").strip()
+        if clean and clean not in out:
+            out.append(clean)
+    return out[:6]
+
+
+def _extract_labeled_value(text: str, label: str) -> str:
+    match = re.search(rf"(?im)^\s*-?\s*{re.escape(label)}\s*:\s*(.+?)\s*$", str(text or ""))
+    if not match:
+        return ""
+    value = match.group(1).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'`', '"', "'"}:
+        value = value[1:-1].strip()
+    return value
+
+
+def _extract_first_code_block(text: str, preferred_langs: tuple[str, ...] = ()) -> str:
+    blocks = re.findall(r"(?is)```([a-zA-Z0-9_+-]*)\n(.*?)```", str(text or ""))
+    if not blocks:
+        return ""
+    normalized = {lang.lower() for lang in preferred_langs}
+    for lang, body in blocks:
+        if not normalized or lang.lower() in normalized:
+            return body.strip()
+    return blocks[0][1].strip()
+
+
+def _has_unclosed_code_fence(text: str) -> bool:
+    return str(text or "").count("```") % 2 == 1
+
+
+def _extract_remaining_lines(text: str, exclude_prefixes: tuple[str, ...]) -> list[str]:
+    out: list[str] = []
+    excluded = tuple(prefix.lower() for prefix in exclude_prefixes)
+    for line in str(text or "").splitlines():
+        clean = line.strip()
+        if not clean:
+            continue
+        if clean.lower().startswith(excluded):
+            continue
+        clean = clean.lstrip("-*").strip()
+        if clean and clean not in out:
+            out.append(clean)
+    return out[:6]
+
+
+def _slugify_dimension(value: str) -> str:
+    text = re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower())
+    return text.strip("_")[:64]
 
 
 def _sanitize_priority(value: Any) -> str:
@@ -1840,6 +2644,33 @@ def _sanitize_scores(raw: dict[str, Any]) -> dict[str, Any]:
         "implementability_score": _coerce_score(raw.get("implementability_score"), 0.5),
         "observability_score": _coerce_score(raw.get("observability_score"), 0.5),
         "rationale": str(raw.get("rationale", "")).strip(),
+    }
+
+
+def _scores_from_codegen_assessment(feasibility: str, complexity: str, validation_checks: list[str]) -> dict[str, Any]:
+    coverage = 0.7
+    observability = 0.78 if validation_checks else 0.7
+    implementability = 0.9
+    if complexity == "medium":
+        implementability = 0.84
+    elif complexity == "high":
+        implementability = 0.68
+    elif complexity == "excessive":
+        implementability = 0.45
+    if feasibility == "feasible_with_revision":
+        implementability = min(implementability, 0.72)
+        observability = max(observability, 0.7)
+        coverage = min(coverage, 0.66)
+    elif feasibility == "not_feasible":
+        implementability = min(implementability, 0.35)
+        observability = min(observability, 0.55)
+        coverage = min(coverage, 0.45)
+    rationale = f"Memo-derived assessment: feasibility={feasibility}, complexity={complexity}."
+    return {
+        "coverage_gain_score": round(coverage, 2),
+        "implementability_score": round(implementability, 2),
+        "observability_score": round(observability, 2),
+        "rationale": rationale,
     }
 
 

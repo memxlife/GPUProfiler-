@@ -1,6 +1,9 @@
 __pycache__/
 .pytest_cache/
 profiling_runs/
+agent_probe_runs/
+research_probe_runs/
+openai_timeout_diagnostics/
 *.pyc
 bench_out/
 gb10_bench/

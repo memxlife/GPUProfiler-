@@ -60,6 +60,13 @@ When `--planner-backend openai` is selected, planning automatically falls back t
 heuristic planner if OpenAI is unavailable (missing key, package, or network issues),
 so autonomous profiling can continue.
 
+Minimal OpenAI connectivity diagnostic:
+
+```bash
+source ./set_key.sh
+python openai_ping.py --model gpt-5.4 --timeout 20 --retries 1
+```
+
 Default autonomous modeling dimensions are fine-grained and include compute and memory hierarchy signals
 (SM throughput, occupancy, instruction mix, L1/L2 behavior, global memory bandwidth/latency, interconnect transfer, shared memory, and thermal/power stability).
 

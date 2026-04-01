@@ -1,5 +1,6 @@
 import argparse
 import json
+from pathlib import Path
 
 from .models import RetryPolicy
 from .orchestrator import build_default_orchestrator, build_orchestrator_with_planner
@@ -46,7 +47,7 @@ def main(argv: list[str] | None = None) -> None:
             samples=args.samples,
             interval_sec=args.interval,
         )
-        print(json.dumps(result, indent=2))
+        _write_final_result(result)
     elif args.command == "autonomous":
         orchestrator = build_orchestrator_with_planner(
             retry_policy=RetryPolicy(max_retries=args.retries, retry_delay_sec=args.retry_delay),
@@ -62,4 +63,12 @@ def main(argv: list[str] | None = None) -> None:
             max_benchmarks=args.max_benchmarks,
             target_coverage=args.target_coverage,
         )
-        print(json.dumps(result, indent=2))
+        _write_final_result(result)
+
+
+def _write_final_result(result: dict) -> None:
+    run_dir = Path(str(result.get("run_dir", "")).strip())
+    if not run_dir:
+        return
+    output_path = run_dir / "final_result.json"
+    output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
