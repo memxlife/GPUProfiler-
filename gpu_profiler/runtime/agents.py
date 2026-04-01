@@ -138,7 +138,6 @@ class LLMPlanningAgent(Agent):
                 "reason": decision.reason,
                 "current_question": decision.current_question,
                 "benchmark_plan": decision.benchmark_plan,
-                "knowledge_model_artifact": task.payload.get("knowledge_model_artifact"),
             }
             benchmark_plan_raw_path = iter_dir / "benchmark_plan_raw.md"
             if decision.raw_response:
@@ -163,9 +162,6 @@ class LLMPlanningAgent(Agent):
             "benchmark_plan": decision.benchmark_plan,
             "research_request": decision.research_request,
         }
-        model_path = iter_dir / "knowledge_model.json"
-        write_json(model_path, decision.knowledge_model)
-        plan["knowledge_model_artifact"] = str(model_path)
         return plan
 
 
@@ -678,8 +674,11 @@ class LLMAnalysisAgent(Agent):
         max_iterations = int(task.payload.get("max_iterations", 4))
         kb_path = Path(task.payload.get("kb_path") or (ctx.run_dir / "run_state.json"))
         kb = read_json(kb_path, {})
-        knowledge_model_path = Path(task.payload.get("knowledge_model_path") or (ctx.run_dir / "knowledge_model.json"))
-        current_model = read_json(knowledge_model_path, {})
+        current_model = (
+            kb.get("current_knowledge_model", {})
+            if isinstance(kb.get("current_knowledge_model", {}), dict)
+            else {}
+        )
         plan = task.payload.get("plan", {})
         execution_results = task.payload.get("execution_results", [])
 
@@ -719,11 +718,9 @@ class LLMAnalysisAgent(Agent):
             iteration=iteration,
         )
         kb["current_knowledge_model"] = updated_model
-        kb["knowledge_model_artifact"] = str(knowledge_model_path)
         kb["knowledge_model_history"].append(
             {
                 "iteration": iteration,
-                "artifact": str(knowledge_model_path),
                 "focus_nodes": updated_model.get("focus_nodes", []),
                 "node_count": len(updated_model.get("domain_hierarchy", [])),
                 "timestamp": time.time(),
@@ -745,7 +742,6 @@ class LLMAnalysisAgent(Agent):
                 "timestamp": time.time(),
             }
         )
-        write_json(knowledge_model_path, updated_model)
         kb_files = update_markdown_knowledge_base(
             ctx.run_dir,
             intent=intent,
@@ -765,8 +761,6 @@ class LLMAnalysisAgent(Agent):
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
         analysis_path = iter_dir / "analysis_update.json"
         analysis_md_path = iter_dir / "analysis.md"
-        iter_model_path = iter_dir / "knowledge_model.json"
-        write_json(iter_model_path, updated_model)
         out = {
             "iteration": iteration,
             "summary": decision.summary,
@@ -782,8 +776,6 @@ class LLMAnalysisAgent(Agent):
             "contract_amendments": decision.contract_amendments,
             "planner": decision.planner,
             "kb_artifact": str(kb_path),
-            "knowledge_model_artifact": str(knowledge_model_path),
-            "knowledge_model_iteration_artifact": str(iter_model_path),
             "knowledge_base_index_artifact": kb.get("knowledge_base_index_artifact"),
             "knowledge_base_frontier_artifact": kb.get("knowledge_base_frontier_artifact"),
         }

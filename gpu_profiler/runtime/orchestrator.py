@@ -100,7 +100,6 @@ class Orchestrator:
         self._attach_run_debug_log(run_dir)
         try:
             dimensions = target_dimensions or DEFAULT_TARGET_DIMENSIONS
-            knowledge_model_path = run_dir / "knowledge_model.json"
             initial_knowledge_model = {
                 "intent": {"summary": intent},
                 "domain_hierarchy": [],
@@ -108,7 +107,6 @@ class Orchestrator:
                 "generated_at": "",
                 "planner_notes": "Initialized local knowledge model.",
             }
-            write_json(knowledge_model_path, initial_knowledge_model)
             kb_files = initialize_markdown_knowledge_base(run_dir, intent)
             knowledge_base: dict[str, Any] = {
                 "intent": intent,
@@ -131,7 +129,6 @@ class Orchestrator:
                 "claims": [],
                 "research_history": [],
                 "current_knowledge_model": initial_knowledge_model,
-                "knowledge_model_artifact": str(knowledge_model_path),
                 **kb_files,
             }
             kb_path = run_dir / "run_state.json"
@@ -153,7 +150,6 @@ class Orchestrator:
                         "max_iterations": max_iterations,
                         "max_benchmarks": max_benchmarks,
                         "knowledge_base": knowledge_base,
-                        "knowledge_model_artifact": knowledge_base.get("knowledge_model_artifact"),
                     },
                 )
                 completed.append(self._run_with_retry(research_plan_task, ctx))
@@ -203,7 +199,6 @@ class Orchestrator:
                         "max_iterations": max_iterations,
                         "max_benchmarks": max_benchmarks,
                         "knowledge_base": knowledge_base,
-                        "knowledge_model_artifact": knowledge_base.get("knowledge_model_artifact"),
                         "research_artifact_md": (
                             knowledge_base.get("latest_research", {})
                             if isinstance(knowledge_base.get("latest_research", {}), dict)
@@ -295,7 +290,6 @@ class Orchestrator:
                         "iteration": iteration,
                         "max_iterations": max_iterations,
                         "kb_path": str(kb_path),
-                        "knowledge_model_path": str(knowledge_model_path),
                         "plan": plan,
                         "execution_results": (execute_task.result or {}).get("results", []),
                     },
