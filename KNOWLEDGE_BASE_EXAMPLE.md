@@ -2,7 +2,7 @@
 
 This file is a small example of the desired long-term knowledge-base style for this repository.
 
-The intended primary representation is not a raw node database. It is a textbook-style body of technical knowledge written in precise markdown, with hierarchical decomposition, cross-references, quantitative statements, explicit evidence references, and open questions at the frontier.
+The intended primary representation is not a raw node database. It is a textbook-style body of technical knowledge written in precise markdown, with hierarchical decomposition, cross-references, quantitative statements, explicit evidence references, open questions at the frontier, and a section-local `Local Findings` field for runtime analyzer updates.
 
 ## Part I. Foundations
 
@@ -18,6 +18,9 @@ Thread blocks are assigned to streaming multiprocessors. Within each multiproces
 
 Quantitative Understanding  
 No trusted local quantitative characterization has yet been established for this section.
+
+Local Findings  
+No accepted local findings have yet been consolidated into this section.
 
 Evidence  
 - General architectural prior knowledge
@@ -52,6 +55,9 @@ If few warps are eligible, the scheduler has limited ability to hide stalls caus
 Quantitative Understanding  
 It is expected that achieved throughput improves as the number of eligible warps increases, but the threshold behavior for this GPU is currently unknown.
 
+Local Findings  
+No accepted local findings have yet been consolidated into this section.
+
 Evidence  
 - Architectural prior knowledge
 - No local scheduler-isolation benchmark yet
@@ -85,6 +91,9 @@ Occupancy is constrained by per-SM limits such as registers, shared memory, maxi
 
 Quantitative Understanding  
 The exact occupancy-performance relationship for this GPU has not yet been calibrated. In particular, the occupancy level beyond which additional warps produce little benefit remains unknown.
+
+Local Findings  
+No accepted local findings have yet been consolidated into this section.
 
 Evidence  
 - General GPU execution model
@@ -125,6 +134,9 @@ Kernel performance depends not only on peak DRAM bandwidth but also on the effic
 Quantitative Understanding  
 A first-pass estimate of sustained DRAM bandwidth for sequential accesses may be measurable with a bounded streaming benchmark, but no trusted local value has yet been recorded in this section.
 
+Local Findings  
+No accepted local findings have yet been consolidated into this section.
+
 Evidence  
 - No accepted local bandwidth benchmark yet
 
@@ -157,6 +169,9 @@ If neighboring threads access addresses that align well with the memory transact
 
 Quantitative Understanding  
 The qualitative effect is known, but the bandwidth-versus-stride curve for this GPU is unknown. In particular, the stride thresholds that materially reduce effective throughput have not yet been measured locally.
+
+Local Findings  
+No accepted local findings have yet been consolidated into this section.
 
 Evidence  
 - General GPU memory-system knowledge
@@ -191,6 +206,9 @@ If reuse occurs within the effective L2 capacity and replacement behavior, acces
 
 Quantitative Understanding  
 The effective L2-resident regime for this GPU is unknown. No local measurement yet identifies the approximate transition from cache-dominated to DRAM-dominated access behavior.
+
+Local Findings  
+No accepted local findings have yet been consolidated into this section.
 
 Evidence  
 - No accepted working-set sweep benchmark yet
@@ -229,6 +247,9 @@ As registers per thread increase, the number of concurrently resident warps may 
 Quantitative Understanding  
 The occupancy loss as a function of register pressure is structurally understood, but the performance impact on this GPU has not yet been characterized across representative microbenchmarks.
 
+Local Findings  
+No accepted local findings have yet been consolidated into this section.
+
 Evidence  
 - Architectural prior knowledge
 - No local register-pressure sweep yet
@@ -265,6 +286,9 @@ A kernel's achieved performance can be compared with compute ceilings and bandwi
 
 Quantitative Understanding  
 No trusted local roofline has yet been established because key ceilings, especially sustained DRAM bandwidth and selected compute ceilings, are still at the frontier.
+
+Local Findings  
+No accepted local findings have yet been consolidated into this section.
 
 Evidence  
 - No completed local roofline calibration yet

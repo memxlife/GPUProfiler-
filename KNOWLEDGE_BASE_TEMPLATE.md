@@ -45,6 +45,9 @@ One short paragraph describing the causal or structural mechanism.
 Quantitative Understanding  
 State what is known numerically, with units and conditions when available. If unknown, say so directly.
 
+Local Findings  
+Concise narrative of local evidence gained so far for this section. If there are no accepted local findings yet, say so directly.
+
 Evidence  
 - artifact or source reference
 - artifact or source reference
@@ -81,6 +84,11 @@ Quantitative Understanding:
 - always include units when numerical values are stated
 - include conditions or benchmark context when relevant
 - if no trusted local estimate exists, say that explicitly
+
+Local Findings:
+- keep this focused on local run evidence, not generic background knowledge
+- write in short narrative prose, not raw logs
+- analyzer should update this field when new local evidence materially changes the section
 
 Evidence:
 - prefer local artifact references first
@@ -136,7 +144,7 @@ Researcher:
 - sharpens or adds open questions
 
 Analyzer:
-- updates quantitative understanding and status from execution evidence
+- updates quantitative understanding, local findings, and status from execution evidence
 - moves statements from frontier toward known when justified
 
 Codegen and runner:

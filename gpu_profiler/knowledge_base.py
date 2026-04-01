@@ -461,6 +461,7 @@ def _parse_section_block(heading: str, lines: list[str]) -> dict[str, Any]:
         "summary": "",
         "mechanism": "",
         "quantitative_understanding": "",
+        "local_findings": "",
         "evidence": [],
         "cross_references": [],
         "status": "",
@@ -473,6 +474,7 @@ def _parse_section_block(heading: str, lines: list[str]) -> dict[str, Any]:
         "Summary": "summary",
         "Mechanism": "mechanism",
         "Quantitative Understanding": "quantitative_understanding",
+        "Local Findings": "local_findings",
     }
     list_fields = {
         "Evidence": "evidence",
@@ -487,6 +489,7 @@ def _parse_section_block(heading: str, lines: list[str]) -> dict[str, Any]:
             "Summary",
             "Mechanism",
             "Quantitative Understanding",
+            "Local Findings",
             "Evidence",
             "Open Questions",
             "Cross References",
@@ -536,6 +539,9 @@ def _render_section_block(section: dict[str, Any]) -> list[str]:
         "",
         "Quantitative Understanding  ",
         str(section.get("quantitative_understanding", "")).strip() or "No quantitative understanding recorded.",
+        "",
+        "Local Findings  ",
+        str(section.get("local_findings", "")).strip() or "No local findings recorded yet.",
         "",
         "Evidence  ",
     ]
@@ -623,6 +629,18 @@ def _update_section_from_analysis(
             str(updated.get("quantitative_understanding", "")).strip(),
             quantitative_update,
         )
+    local_finding = _synthesize_local_finding(
+        section=updated,
+        matches=matches,
+        matched_dimensions=matched_dimensions,
+        analysis=analysis,
+        update_ref=update_ref,
+    )
+    if local_finding:
+        updated["local_findings"] = _merge_text_block(
+            str(updated.get("local_findings", "")).strip(),
+            local_finding,
+        )
     if matches:
         updated["open_questions"] = [
             item
@@ -678,12 +696,37 @@ def _synthesize_quantitative_update(
     return ""
 
 
+def _synthesize_local_finding(
+    *,
+    section: dict[str, Any],
+    matches: list[dict[str, Any]],
+    matched_dimensions: list[str],
+    analysis: dict[str, Any],
+    update_ref: str,
+) -> str:
+    heading = str(section.get("section", "")).strip()
+    claim_summaries = [str(item.get("claim", "")).strip().rstrip(".") for item in matches if str(item.get("claim", "")).strip()]
+    if claim_summaries:
+        lead = heading or "This section"
+        joined = "; ".join(claim_summaries[:2])
+        return f"{lead} gained new local support in {update_ref}: {joined}."
+    summary = str(analysis.get("summary", "")).strip().rstrip(".")
+    if summary and matched_dimensions:
+        dims_text = ", ".join(matched_dimensions[:3])
+        lead = heading or "This section"
+        return f"{lead} received a local analysis update in {update_ref} for {dims_text}: {summary}."
+    return ""
+
+
 def _merge_text_block(existing: str, new_text: str) -> str:
     existing = str(existing or "").strip()
     new_text = str(new_text or "").strip()
     if not new_text:
         return existing
-    if not existing or existing == "No quantitative understanding recorded.":
+    if not existing or existing in {
+        "No quantitative understanding recorded.",
+        "No local findings recorded yet.",
+    }:
         return new_text
     if new_text in existing:
         return existing
@@ -803,6 +846,9 @@ Thread blocks map onto streaming multiprocessors, and warps are the units expose
 Quantitative Understanding  
 No trusted local quantitative characterization has yet been established for this section.
 
+Local Findings  
+No local findings recorded yet.
+
 Evidence  
 - No accepted local evidence yet
 
@@ -840,6 +886,9 @@ Effective throughput depends on transaction efficiency, caching, and the ability
 Quantitative Understanding  
 No trusted local DRAM bandwidth estimate has yet been established in this chapter.
 
+Local Findings  
+No local findings recorded yet.
+
 Evidence  
 - No accepted local evidence yet
 
@@ -871,6 +920,9 @@ Accesses that align well across a warp usually require fewer transactions and th
 Quantitative Understanding  
 The stride-to-bandwidth relationship for this GPU is not yet locally characterized.
 
+Local Findings  
+No local findings recorded yet.
+
 Evidence  
 - No accepted local evidence yet
 
@@ -901,6 +953,9 @@ When reuse falls within the effective L2 regime, traffic pressure on DRAM can be
 
 Quantitative Understanding  
 The effective L2-resident regime for this GPU is not yet locally characterized.
+
+Local Findings  
+No local findings recorded yet.
 
 Evidence  
 - No accepted local evidence yet
@@ -940,6 +995,9 @@ Higher register allocation reduces the number of resident warps when the per-SM 
 Quantitative Understanding  
 The performance sensitivity to register pressure on this GPU is not yet calibrated.
 
+Local Findings  
+No local findings recorded yet.
+
 Evidence  
 - No accepted local evidence yet
 
@@ -977,6 +1035,9 @@ Useful roofline analysis depends on measured or well-justified compute and bandw
 
 Quantitative Understanding  
 No trusted local roofline has yet been established.
+
+Local Findings  
+No local findings recorded yet.
 
 Evidence  
 - No accepted local evidence yet
