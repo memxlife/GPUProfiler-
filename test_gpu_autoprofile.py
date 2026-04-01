@@ -12,9 +12,13 @@ from gpu_profiler.agents import (
     Agent,
     CommunicationMonitorAgent,
     LLMCodegenAgent,
+    LLMResearchAgent,
     WorkloadRunnerAgent,
     _extract_compile_preflight,
     _preflight_single_benchmark,
+    _render_analysis_md,
+    _render_proposal_md,
+    _render_research_request_md,
 )
 from gpu_profiler.llm import (
     ANALYSIS_TIMEOUT_SEC,
@@ -34,6 +38,11 @@ from gpu_profiler.llm import (
     _compact_codegen_plan,
     _compact_planner_kb,
     _enforce_payload_budget,
+)
+from gpu_profiler.markdown_artifacts import (
+    parse_analysis_markdown,
+    parse_proposal_markdown,
+    parse_research_request_markdown,
 )
 from gpu_profiler.models import AgentContext, RetryPolicy, Task
 from gpu_profiler.orchestrator import Orchestrator
@@ -210,6 +219,149 @@ def test_schema_contract_uses_split_planner_outputs():
     assert contract["research_request_output"]["required_keys"] == ["reason", "research_request"]
     assert contract["proposal_output"]["required_keys"] == ["reason", "proposal"]
     assert "planner_output" not in contract
+
+
+def test_parse_research_request_markdown_round_trip():
+    rendered = _render_research_request_md(
+        {
+            "iteration": 0,
+            "planner": "test-planner",
+            "reason": "Prioritize roofline-oriented evidence collection.",
+            "research_request": {
+                "request_summary": "Collect prior methods for bandwidth and latency characterization.",
+                "target_nodes": ["dram_bandwidth", "l2_cache"],
+                "target_questions": ["Which minimal benchmarks isolate DRAM bandwidth?"],
+                "search_topics": ["roofline metrics", "cuda memory hierarchy"],
+                "expected_outputs": ["candidate benchmark patterns", "metric checklist"],
+            },
+        }
+    )
+
+    parsed = parse_research_request_markdown(rendered)
+
+    assert parsed["request_summary"] == "Collect prior methods for bandwidth and latency characterization."
+    assert parsed["target_nodes"] == ["dram_bandwidth", "l2_cache"]
+    assert parsed["target_questions"] == ["Which minimal benchmarks isolate DRAM bandwidth?"]
+    assert parsed["search_topics"] == ["roofline metrics", "cuda memory hierarchy"]
+    assert parsed["expected_outputs"] == ["candidate benchmark patterns", "metric checklist"]
+
+
+def test_parse_proposal_markdown_round_trip():
+    rendered = _render_proposal_md(
+        {
+            "iteration": 0,
+            "planner": "test-planner",
+            "reason": "Start with the highest-value unresolved memory question.",
+            "proposal": {
+                "proposal_summary": "Measure sustained DRAM bandwidth before exploring deeper caches.",
+                "target_nodes": ["dram_bandwidth"],
+                "proposals": [
+                    {
+                        "id": "proposal_0_0",
+                        "title": "Bounded DRAM streaming bandwidth microbenchmark",
+                        "benchmark_role": "microbenchmark",
+                        "objective": "Estimate sustained DRAM throughput with simple coalesced loads.",
+                        "hypothesis": "Sequential loads will expose a stable DRAM bandwidth ceiling.",
+                        "rationale": "This provides the first roofline anchor.",
+                        "target_node_ids": ["dram_bandwidth"],
+                        "required_evidence": ["successful run", "timing artifact"],
+                        "success_unlocks": "A first-pass bandwidth roofline anchor.",
+                    }
+                ],
+            },
+        }
+    )
+
+    parsed = parse_proposal_markdown(rendered)
+
+    assert parsed["proposal_summary"] == "Measure sustained DRAM bandwidth before exploring deeper caches."
+    assert parsed["target_nodes"] == ["dram_bandwidth"]
+    assert len(parsed["proposals"]) == 1
+    assert parsed["proposals"][0]["id"] == "proposal_0_0"
+    assert parsed["proposals"][0]["title"] == "Bounded DRAM streaming bandwidth microbenchmark"
+    assert parsed["proposals"][0]["target_node_ids"] == ["dram_bandwidth"]
+    assert parsed["proposals"][0]["required_evidence"] == ["successful run", "timing artifact"]
+
+
+def test_parse_analysis_markdown_round_trip():
+    rendered = _render_analysis_md(
+        {
+            "iteration": 0,
+            "planner": "test-analyzer",
+            "summary": "The first benchmark established a preliminary bandwidth bound.",
+            "claims": [
+                {
+                    "claim": "The benchmark produced a measurable DRAM bandwidth estimate.",
+                    "claim_type": "observation",
+                    "confidence": "medium",
+                    "status": "active",
+                    "method_summary": "Observed from the recorded benchmark timing artifact.",
+                    "dimensions": ["dram_bandwidth"],
+                    "evidence": {
+                        "analysis_artifact": "iterations/iter_00/analysis.md",
+                        "workload_artifact": "iterations/iter_00/bench_00/result.json",
+                    },
+                }
+            ],
+            "claims_added": 1,
+            "covered_dimensions": ["dram_bandwidth"],
+            "coverage_score": 0.2,
+            "stop": False,
+            "reason": "Continue toward cache characterization.",
+            "required_observability": ["timing variance across repeats"],
+        }
+    )
+
+    parsed = parse_analysis_markdown(rendered)
+
+    assert parsed["summary"] == "The first benchmark established a preliminary bandwidth bound."
+    assert parsed["reason"] == "Continue toward cache characterization."
+    assert parsed["stop"] is False
+    assert parsed["covered_dimensions"] == ["dram_bandwidth"]
+    assert parsed["required_observability"] == ["timing variance across repeats"]
+    assert len(parsed["claims"]) == 1
+    assert parsed["claims"][0]["claim_type"] == "observation"
+    assert parsed["claims"][0]["dimensions"] == ["dram_bandwidth"]
+
+
+def test_llm_research_agent_accepts_markdown_only_request_artifact(tmp_path):
+    request_md = tmp_path / "research_request.md"
+    request_md.write_text(
+        _render_research_request_md(
+            {
+                "iteration": 0,
+                "planner": "test-planner",
+                "reason": "Need background before proposing the first benchmark.",
+                "research_request": {
+                    "request_summary": "Measure local capabilities.",
+                    "target_nodes": ["device_capabilities"],
+                    "target_questions": ["Which local profiling tools are available?"],
+                    "search_topics": ["ncu availability"],
+                    "expected_outputs": ["tool inventory"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    agent = LLMResearchAgent(workflow_backend=HeuristicWorkflowBackend())
+    ctx = AgentContext(run_id="run-1", run_dir=tmp_path)
+    task = Task(
+        id="iter0-llm-research-0",
+        kind="llm_research",
+        payload={
+            "intent": "Develop a performance model for the local GPU",
+            "iteration": 0,
+            "knowledge_base": {},
+            "research_request_artifact": str(request_md),
+            "max_sources": 4,
+        },
+    )
+
+    result = agent.run(task, ctx)
+
+    assert result["request_summary"] == "Measure local capabilities."
+    assert result["research_request_meta_artifact"] is None
+    assert (tmp_path / "iterations" / "iter_00" / "research.md").exists()
 
 
 def test_resilient_workflow_falls_back_when_openai_plan_times_out():

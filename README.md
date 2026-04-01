@@ -3,6 +3,7 @@
 A tiny todo CLI built with `argparse` and JSON storage.
 
 For the current autonomous GPU research system contract, see `BUILD_PROMPT.md`.
+For the markdown-first artifact transition, see `MARKDOWN_ARTIFACT_SPEC.md`.
 
 ## Commands
 

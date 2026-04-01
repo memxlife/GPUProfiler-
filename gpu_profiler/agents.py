@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .markdown_artifacts import parse_proposal_markdown, parse_research_request_markdown
 from .llm import (
     CODEGEN_SYSTEM_PROMPT,
     HeuristicWorkflowBackend,
@@ -175,14 +176,18 @@ class LLMPlanningAgent(Agent):
         proposal_path = iter_dir / "proposal.json"
         proposal_md_path = iter_dir / "proposal.md"
         research_request_path = iter_dir / "research_request.json"
+        research_request_md_path = iter_dir / "research_request.md"
         write_json(model_path, decision.knowledge_model)
         write_json(proposal_path, decision.proposal)
         write_text(proposal_md_path, _render_proposal_md(plan))
         if isinstance(decision.research_request, dict):
             write_json(research_request_path, decision.research_request)
-            plan["research_request_artifact"] = str(research_request_path)
+            write_text(research_request_md_path, _render_research_request_md(plan))
+            plan["research_request_artifact"] = str(research_request_md_path)
+            plan["research_request_meta_artifact"] = str(research_request_path)
         else:
             plan["research_request_artifact"] = None
+            plan["research_request_meta_artifact"] = None
         plan["knowledge_model_artifact"] = str(model_path)
         plan["proposal_artifact"] = str(proposal_path)
         plan["proposal_md_artifact"] = str(proposal_md_path)
@@ -244,9 +249,11 @@ class LLMResearchAgent(Agent):
             raise ValueError("llm_research requires research_request_artifact")
         request_memo = _read_text_artifact(request_path)
         request_meta_path = task.payload.get("research_request_meta_artifact")
-        meta_path = Path(request_meta_path) if request_meta_path else Path(request_path)
-        research_request = read_json(meta_path, {})
+        meta_path = Path(request_meta_path) if request_meta_path else None
+        research_request = read_json(meta_path, {}) if meta_path else {}
         if not isinstance(research_request, dict) or not research_request:
+            research_request = parse_research_request_markdown(request_memo)
+        if not isinstance(research_request, dict) or not research_request.get("request_summary", "").strip():
             raise ValueError("research_request_artifact did not contain a valid request object")
         intent = str(research_request.get("intent_summary", task.payload.get("intent", ""))).strip()
         max_sources = int(task.payload.get("max_sources", 8))
@@ -268,7 +275,7 @@ class LLMResearchAgent(Agent):
             "findings": decision.findings,
             "proposed_dimensions": decision.proposed_dimensions,
             "research_request_artifact": str(request_path),
-            "research_request_meta_artifact": str(meta_path),
+            "research_request_meta_artifact": str(meta_path) if meta_path else None,
         }
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
         iter_dir.mkdir(parents=True, exist_ok=True)
@@ -303,6 +310,10 @@ class LLMCodegenAgent(Agent):
         amendment_round = int(task.payload.get("amendment_round", 0))
         amendment_feedback = task.payload.get("amendment_feedback", [])
         proposal_memo = _read_text_artifact(plan.get("proposal_md_artifact"))
+        if not isinstance(plan.get("proposal", {}), dict) or not plan.get("proposal", {}):
+            parsed_proposal = parse_proposal_markdown(proposal_memo)
+            if parsed_proposal.get("proposals"):
+                plan = {**plan, "proposal": parsed_proposal}
         working_proposal_memo = proposal_memo
 
         prompt_sections: list[str] = []
@@ -805,6 +816,7 @@ class LLMAnalysisAgent(Agent):
         out = {
             "iteration": iteration,
             "summary": decision.summary,
+            "claims": decision.claims,
             "claims_added": len(decision.claims),
             "covered_dimensions": covered,
             "coverage_score": coverage_score,
@@ -1229,17 +1241,54 @@ def _render_proposal_md(plan: dict[str, Any]) -> str:
     lines = [
         f"# Iteration {plan.get('iteration')} Proposal",
         "",
+        "## Metadata",
         f"- planner: `{plan.get('planner')}`",
         f"- reason: {plan.get('reason')}",
         "",
         "## Proposal Summary",
-        f"- {proposal.get('proposal_summary', '')}",
+        proposal.get("proposal_summary", ""),
         "",
-        "## Proposed Benchmarks",
+        "## Target Nodes",
     ]
-    for item in proposal.get("proposals", []):
-        lines.append(
-            f"- title: {item.get('title')} | targets: {item.get('target_node_ids', [])} | role: {item.get('benchmark_role')}"
+    target_nodes = [str(x).strip() for x in proposal.get("target_nodes", []) if str(x).strip()]
+    if target_nodes:
+        for item in target_nodes:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Proposed Benchmarks"])
+    for index, item in enumerate(proposal.get("proposals", []), start=1):
+        lines.extend(
+            [
+                f"### Benchmark {index}",
+                f"- id: `{item.get('id', '')}`",
+                f"- title: {item.get('title', '')}",
+                f"- benchmark role: {item.get('benchmark_role', '')}",
+                f"- objective: {item.get('objective', '')}",
+                f"- hypothesis: {item.get('hypothesis', '')}",
+                f"- rationale: {item.get('rationale', '')}",
+                "#### Target Nodes",
+            ]
+        )
+        target_node_ids = [str(x).strip() for x in item.get("target_node_ids", []) if str(x).strip()]
+        if target_node_ids:
+            for node in target_node_ids:
+                lines.append(f"- {node}")
+        else:
+            lines.append("- none")
+        lines.append("#### Required Evidence")
+        required_evidence = [str(x).strip() for x in item.get("required_evidence", []) if str(x).strip()]
+        if required_evidence:
+            for evidence in required_evidence:
+                lines.append(f"- {evidence}")
+        else:
+            lines.append("- none specified")
+        lines.extend(
+            [
+                "#### What Success Unlocks",
+                str(item.get("success_unlocks", "")).strip() or str(item.get("rationale", "")).strip() or "Not specified.",
+                "",
+            ]
         )
     return "\n".join(lines)
 
@@ -1249,6 +1298,7 @@ def _render_research_request_md(result: dict[str, Any]) -> str:
     lines = [
         f"# Iteration {result.get('iteration')} Research Request",
         "",
+        "## Metadata",
         f"- planner: `{result.get('planner')}`",
         f"- reason: {result.get('reason')}",
         "",
@@ -1377,17 +1427,33 @@ def _render_research_md(research: dict[str, Any]) -> str:
     lines = [
         f"# Iteration {research.get('iteration')} Research",
         "",
+        "## Metadata",
         f"- planner: `{research.get('planner')}`",
         f"- reason: {research.get('reason')}",
         "",
-        "## Proposed Dimensions",
-        f"- {research.get('proposed_dimensions', [])}",
+        "## Request Summary",
+        str(research.get("request_summary", "")).strip() or "No request summary recorded.",
         "",
-        "## Findings",
+        "## Proposed Dimensions",
     ]
-    for item in research.get("findings", []):
+    proposed_dimensions = [str(x).strip() for x in research.get("proposed_dimensions", []) if str(x).strip()]
+    if proposed_dimensions:
+        for item in proposed_dimensions:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Unanswered Questions"])
+    unanswered_questions = [str(x).strip() for x in research.get("unanswered_questions", []) if str(x).strip()]
+    if unanswered_questions:
+        for item in unanswered_questions:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Findings"])
+    for index, item in enumerate(research.get("findings", []), start=1):
         lines.extend(
             [
+                f"### Finding {index}",
                 f"- title: {item.get('title')}",
                 f"- relevance: {item.get('relevance')}",
                 f"- source: {item.get('source_url')}",
@@ -1395,6 +1461,8 @@ def _render_research_md(research: dict[str, Any]) -> str:
                 "",
             ]
         )
+    if not research.get("findings", []):
+        lines.append("No findings recorded.")
     return "\n".join(lines)
 
 
@@ -1412,43 +1480,53 @@ def _render_implementation_md(implementation: dict[str, Any]) -> str:
     lines = [
         f"# Iteration {implementation.get('iteration')} Implementation",
         "",
+        "## Metadata",
         f"- planner: `{implementation.get('planner')}`",
         f"- reason: {implementation.get('reason')}",
         "",
         "## Benchmarks",
     ]
-    for bench in implementation.get("benchmarks", []):
+    for index, bench in enumerate(implementation.get("benchmarks", []), start=1):
         lines.extend(
             [
+                f"### Benchmark {index}",
                 f"- id: `{bench.get('id')}`",
                 f"- dimensions: `{bench.get('dimensions', [])}`",
                 f"- hypothesis: {bench.get('hypothesis')}",
-                f"- feasibility_status: `{bench.get('feasibility_status')}`",
-                f"- implementation_complexity: `{bench.get('implementation_complexity')}`",
+                f"- feasibility status: `{bench.get('feasibility_status')}`",
+                f"- implementation complexity: `{bench.get('implementation_complexity')}`",
                 f"- scores: `{bench.get('scores', {})}`",
-                f"- utility_score: `{bench.get('utility_score')}`",
+                f"- utility score: `{bench.get('utility_score')}`",
                 f"- command: `{bench.get('command')}`",
                 "",
             ]
         )
+    if not implementation.get("benchmarks"):
+        lines.append("No accepted benchmarks were generated.")
     if implementation.get("feasibility_summary"):
-        lines.extend(["## Feasibility Summary", f"- {implementation.get('feasibility_summary')}"])
+        lines.extend(["", "## Feasibility Summary", f"- {implementation.get('feasibility_summary')}"])
     if implementation.get("rejected_benchmarks"):
-        lines.extend(["## Rejected Benchmarks"])
-        for item in implementation.get("rejected_benchmarks", []):
-            lines.append(
-                f"- id: `{item.get('id')}` | reasons: `{item.get('reasons', [])}` | scores: `{item.get('scores', {})}`"
+        lines.extend(["", "## Rejected Benchmarks"])
+        for index, item in enumerate(implementation.get("rejected_benchmarks", []), start=1):
+            lines.extend(
+                [
+                    f"### Rejected Benchmark {index}",
+                    f"- id: `{item.get('id')}`",
+                    f"- reasons: `{item.get('reasons', [])}`",
+                    f"- scores: `{item.get('scores', {})}`",
+                    "",
+                ]
             )
     if implementation.get("negotiation"):
-        lines.extend(["## Negotiation", f"- {implementation.get('negotiation')}"])
+        lines.extend(["", "## Negotiation", f"- {implementation.get('negotiation')}"])
     if implementation.get("contract_amendments"):
-        lines.extend(["## Contract Amendments"])
+        lines.extend(["", "## Contract Amendments"])
         for item in implementation.get("contract_amendments", []):
             lines.append(
                 f"- path: `{item.get('path')}` | change: {item.get('change')} | priority: `{item.get('priority')}`"
             )
     if implementation.get("generated_files"):
-        lines.extend(["## Generated Files"])
+        lines.extend(["", "## Generated Files"])
         for path in implementation.get("generated_files", []):
             lines.append(f"- `{path}`")
     return "\n".join(lines)
@@ -1482,17 +1560,56 @@ def _render_analysis_md(analysis: dict[str, Any]) -> str:
     lines = [
         f"# Iteration {analysis.get('iteration')} Analysis",
         "",
+        "## Metadata",
         f"- planner: `{analysis.get('planner')}`",
         f"- summary: {analysis.get('summary')}",
-        f"- claims_added: `{analysis.get('claims_added', 0)}`",
-        f"- covered_dimensions: `{analysis.get('covered_dimensions', [])}`",
-        f"- coverage_score: `{analysis.get('coverage_score', 0.0)}`",
+        f"- claims added: `{analysis.get('claims_added', 0)}`",
+        f"- coverage score: `{analysis.get('coverage_score', 0.0)}`",
         f"- stop: `{analysis.get('stop', False)}`",
         f"- reason: {analysis.get('reason')}",
     ]
     veto_reason = str(analysis.get("veto_reason", "")).strip()
     if veto_reason:
         lines.append(f"- veto_reason: {veto_reason}")
+    lines.extend(["", "## Covered Dimensions"])
+    covered_dimensions = [str(x).strip() for x in analysis.get("covered_dimensions", []) if str(x).strip()]
+    if covered_dimensions:
+        for item in covered_dimensions:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Claims"])
+    claims = analysis.get("claims", [])
+    if claims:
+        for index, item in enumerate(claims, start=1):
+            evidence = item.get("evidence", {}) if isinstance(item.get("evidence", {}), dict) else {}
+            evidence_refs = [str(value).strip() for value in evidence.values() if str(value).strip()]
+            lines.extend(
+                [
+                    f"### Claim {index}",
+                    f"- claim: {item.get('claim', '')}",
+                    f"- claim type: {item.get('claim_type', item.get('type', 'inference'))}",
+                    f"- confidence: `{item.get('confidence', '')}`",
+                    f"- status: `{item.get('status', 'active')}`",
+                    f"- method summary: {item.get('method_summary', 'Derived from the recorded execution evidence and analysis memo.')}",
+                    "#### Dimensions",
+                ]
+            )
+            dimensions = [str(x).strip() for x in item.get("dimensions", []) if str(x).strip()]
+            if dimensions:
+                for dim in dimensions:
+                    lines.append(f"- {dim}")
+            else:
+                lines.append("- none")
+            lines.append("#### Evidence")
+            if evidence_refs:
+                for ref in evidence_refs:
+                    lines.append(f"- {ref}")
+            else:
+                lines.append("- none recorded")
+            lines.append("")
+    else:
+        lines.append("No claims recorded.")
     required_observability = analysis.get("required_observability", [])
     if required_observability:
         lines.extend(["", "## Required Observability"])
