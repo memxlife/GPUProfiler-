@@ -44,7 +44,7 @@ class ResearchRequestPlanDecision:
 
 
 @dataclass
-class ProposalPlanDecision:
+class BenchmarkPlanDecision:
     reason: str
     proposal: dict[str, Any]
     planner: str
@@ -145,7 +145,7 @@ class LLMWorkflowBackend:
     ) -> ResearchRequestPlanDecision:
         raise NotImplementedError
 
-    def plan_proposal(
+    def plan_benchmark(
         self,
         intent: str,
         kb: dict[str, Any],
@@ -154,7 +154,7 @@ class LLMWorkflowBackend:
         max_benchmarks: int,
         question_memo: str = "",
         research_memo: str = "",
-    ) -> ProposalPlanDecision:
+    ) -> BenchmarkPlanDecision:
         raise NotImplementedError
 
     def generate_implementation(
@@ -287,7 +287,7 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
         max_benchmarks: int,
     ) -> PlanDecision:
         research = self.plan_research_request(intent, kb, iteration, max_iterations, max_benchmarks)
-        proposal = self.plan_proposal(intent, kb, iteration, max_iterations, max_benchmarks)
+        proposal = self.plan_benchmark(intent, kb, iteration, max_iterations, max_benchmarks)
         return PlanDecision(
             reason=proposal.reason,
             knowledge_model=_current_or_default_knowledge_model(kb=kb, intent=intent),
@@ -322,7 +322,7 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
             raw_response="",
         )
 
-    def plan_proposal(
+    def plan_benchmark(
         self,
         intent: str,
         kb: dict[str, Any],
@@ -331,10 +331,10 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
         max_benchmarks: int,
         question_memo: str = "",
         research_memo: str = "",
-    ) -> ProposalPlanDecision:
+    ) -> BenchmarkPlanDecision:
         _ = (max_iterations, research_memo)
         focus = _planner_focus_dimensions_from_kb(kb=kb, iteration=iteration, max_benchmarks=max_benchmarks)
-        return ProposalPlanDecision(
+        return BenchmarkPlanDecision(
             reason="Fallback planner produced generic plan items.",
             proposal=_default_proposal(intent=intent, focus_dimensions=focus, iteration=iteration),
             current_question=_question_text_from_memo(question_memo) or _next_frontier_question(kb=kb, focus_dimensions=focus),
@@ -604,7 +604,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         max_benchmarks: int,
     ) -> PlanDecision:
         research = self.plan_research_request(intent, kb, iteration, max_iterations, max_benchmarks)
-        proposal = self.plan_proposal(intent, kb, iteration, max_iterations, max_benchmarks)
+        proposal = self.plan_benchmark(intent, kb, iteration, max_iterations, max_benchmarks)
         return PlanDecision(
             reason=proposal.reason,
             knowledge_model=_current_or_default_knowledge_model(kb=kb, intent=intent),
@@ -682,7 +682,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             raw_response=json.dumps(out, indent=2),
         )
 
-    def plan_proposal(
+    def plan_benchmark(
         self,
         intent: str,
         kb: dict[str, Any],
@@ -691,7 +691,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         max_benchmarks: int,
         question_memo: str = "",
         research_memo: str = "",
-    ) -> ProposalPlanDecision:
+    ) -> BenchmarkPlanDecision:
         compact_kb = _compact_planner_kb(
             kb=kb,
             max_nodes=max(6, max_benchmarks * 4),
@@ -720,7 +720,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                 "Do not output JSON. Do not output executable code, commands, or profiler invocations."
             ),
             user=user_prompt,
-            context="planner-proposal",
+            context="planner-benchmark",
             timeout_sec=PLANNER_REQUEST_TIMEOUT_SEC,
         )
         proposal = _proposal_from_memo(
@@ -733,7 +733,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         if not focus:
             focus = _planner_focus_dimensions_from_kb(kb=kb, iteration=iteration, max_benchmarks=max_benchmarks)
         proposal = _sanitize_proposal(proposal, intent=intent, focus_nodes=focus, iteration=iteration)
-        return ProposalPlanDecision(
+        return BenchmarkPlanDecision(
             reason=_proposal_reason_from_memo(memo),
             proposal=proposal,
             current_question=_question_text_from_memo(question_memo) or _next_frontier_question(kb=kb, focus_dimensions=focus),
@@ -1134,7 +1134,7 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
             alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
             return alt
 
-    def plan_proposal(
+    def plan_benchmark(
         self,
         intent: str,
         kb: dict[str, Any],
@@ -1143,12 +1143,12 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
         max_benchmarks: int,
         question_memo: str = "",
         research_memo: str = "",
-    ) -> ProposalPlanDecision:
+    ) -> BenchmarkPlanDecision:
         try:
-            return self._call_primary("plan_proposal", intent, kb, iteration, max_iterations, max_benchmarks, question_memo, research_memo)
+            return self._call_primary("plan_benchmark", intent, kb, iteration, max_iterations, max_benchmarks, question_memo, research_memo)
         except Exception as exc:  # noqa: BLE001
-            alt = self.fallback.plan_proposal(intent, kb, iteration, max_iterations, max_benchmarks, question_memo, research_memo)
-            alt.reason = f"Primary proposal planning failed ({exc}); fallback used. {alt.reason}"
+            alt = self.fallback.plan_benchmark(intent, kb, iteration, max_iterations, max_benchmarks, question_memo, research_memo)
+            alt.reason = f"Primary benchmark planning failed ({exc}); fallback used. {alt.reason}"
             alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
             return alt
 
@@ -1349,7 +1349,7 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
             return _robust_response_threshold("codegen-memo", attempt_timeout) + 5.0
         if method_name == "propose_plan":
             attempt_timeout = max(5.0, timeout_sec + 5.0)
-            return _robust_response_threshold("planner-proposal", attempt_timeout) + 5.0
+            return _robust_response_threshold("planner-benchmark", attempt_timeout) + 5.0
         if method_name == "research_context":
             attempt_timeout = max(RESEARCH_TIMEOUT_SEC + 5.0, timeout_sec + 5.0)
             return _robust_response_threshold("research-context", attempt_timeout) + 5.0
@@ -1396,7 +1396,7 @@ def _launch_openai_timeout_diagnostic(
     }
     (run_dir / "event.json").write_text(json.dumps(event, indent=2), encoding="utf-8")
 
-    ping_script = repo_root / "openai_ping.py"
+    ping_script = repo_root / "scripts" / "openai_ping.py"
     if ping_script.exists():
         ping_cmd = [
             sys.executable,
@@ -1418,12 +1418,12 @@ def _launch_openai_timeout_diagnostic(
             env=_diagnostic_environment(primary),
         )
 
-    probe_script = repo_root / "openai_agent_probe.py"
+    probe_script = repo_root / "scripts" / "openai_agent_probe.py"
     query = str(payload.get("query", "")).strip()
     if probe_script.exists() and query and method_name in {
         "plan_research_request",
         "research_context",
-        "plan_proposal",
+        "plan_benchmark",
         "generate_implementation",
         "analyze_results",
     }:
@@ -1516,7 +1516,7 @@ def _timeout_diagnostic_payload(method_name: str, args: tuple[Any, ...]) -> dict
         payload["query"] = payload["intent"]
         payload["iteration"] = int(args[2]) if len(args) > 2 else 0
         return payload
-    if method_name == "plan_proposal":
+    if method_name == "plan_benchmark":
         payload["intent"] = str(args[0]).strip() if args else ""
         payload["iteration"] = int(args[2]) if len(args) > 2 else 0
         payload["query"] = str(args[5]).strip() if len(args) > 5 and str(args[5]).strip() else payload["intent"]
@@ -1555,7 +1555,7 @@ def _method_timeout_context(method_name: str) -> str:
     mapping = {
         "negotiate_schema": "schema-contract",
         "plan_research_request": "plan-research-request",
-        "plan_proposal": "planner-proposal",
+        "plan_benchmark": "planner-benchmark",
         "research_context": "research-context",
         "generate_implementation": "codegen-memo",
         "analyze_results": "analysis-json",
@@ -1566,7 +1566,7 @@ def _method_timeout_context(method_name: str) -> str:
 def _method_timeout_sender(method_name: str) -> str:
     mapping = {
         "plan_research_request": "llm-planner",
-        "plan_proposal": "llm-planner",
+        "plan_benchmark": "llm-planner",
         "research_context": "llm-research",
         "generate_implementation": "llm-codegen",
         "analyze_results": "llm-analysis",

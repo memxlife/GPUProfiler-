@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from openai_research_probe import (
+from scripts.openai_research_probe import (
     build_probe_knowledge_base,
     build_research_request,
     load_queries,
@@ -21,7 +21,7 @@ from gpu_profiler.llm import OpenAIWorkflowBackend
 AGENT_CHOICES = (
     "plan_research_request",
     "research_context",
-    "plan_proposal",
+    "plan_benchmark",
     "generate_implementation",
     "analyze_results",
 )
@@ -171,7 +171,7 @@ def evaluate_agent_result(agent_name: str, result: Any) -> dict[str, Any]:
             "findings_count": len(findings),
             "unique_source_count": len(unique_sources),
         }
-    if agent_name == "plan_proposal":
+    if agent_name == "plan_benchmark":
         proposal = result.proposal if isinstance(result.proposal, dict) else {}
         proposals = proposal.get("proposals", []) if isinstance(proposal.get("proposals", []), list) else []
         meaningful = bool(result.reason.strip()) and len(proposals) >= 1
@@ -223,7 +223,7 @@ def serialize_agent_result(agent_name: str, result: Any) -> dict[str, Any]:
             "planner": result.planner,
             "raw_response": result.raw_response,
         }
-    if agent_name == "plan_proposal":
+    if agent_name == "plan_benchmark":
         return {
             "reason": result.reason,
             "proposal": result.proposal,
@@ -283,8 +283,8 @@ def run_agent_probe_attempt(
                 research_request_memo=fixture["research_request_memo"],
                 max_sources=fixture["max_sources"],
             )
-        elif agent_name == "plan_proposal":
-            result = backend.plan_proposal(
+        elif agent_name == "plan_benchmark":
+            result = backend.plan_benchmark(
                 intent=fixture["intent"],
                 kb=fixture["kb"],
                 iteration=fixture["iteration"],

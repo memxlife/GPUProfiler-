@@ -81,7 +81,7 @@ class LLMPlanningAgent(Agent):
         self.workflow_backend = workflow_backend or HeuristicWorkflowBackend()
 
     def can_handle(self, task: Task) -> bool:
-        return task.kind in {"llm_plan_research", "llm_plan_proposal", "llm_plan"}
+        return task.kind in {"llm_plan_research", "llm_plan_benchmark", "llm_plan"}
 
     def run(self, task: Task, ctx: AgentContext) -> dict[str, Any]:
         intent = str(task.payload.get("intent", "")).strip()
@@ -119,10 +119,10 @@ class LLMPlanningAgent(Agent):
                 result["research_request_raw_artifact"] = None
             return result
 
-        if task.kind == "llm_plan_proposal":
+        if task.kind == "llm_plan_benchmark":
             research_memo = _read_text_artifact(task.payload.get("research_artifact_md"))
             question_memo = str(task.payload.get("current_question", "")).strip()
-            decision = self.workflow_backend.plan_proposal(
+            decision = self.workflow_backend.plan_benchmark(
                 intent=intent,
                 kb=kb,
                 iteration=iteration,

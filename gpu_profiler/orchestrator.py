@@ -195,8 +195,8 @@ class Orchestrator:
                     knowledge_base = self._load_kb(kb_path)
 
                 proposal_task = Task(
-                    id=f"iter{iteration}-llm-plan-proposal-0",
-                    kind="llm_plan_proposal",
+                    id=f"iter{iteration}-llm-plan-benchmark-0",
+                    kind="llm_plan_benchmark",
                     payload={
                         "intent": intent,
                         "iteration": iteration,
@@ -215,10 +215,10 @@ class Orchestrator:
                 completed.append(self._run_with_retry(proposal_task, ctx))
                 self._persist_run_log(run_dir, completed)
                 if proposal_task.status != "done":
-                    self._update_run_state(kb_path, status="stopped", reason="planner_proposal_failed", iteration=iteration)
+                    self._update_run_state(kb_path, status="stopped", reason="planner_benchmark_failed", iteration=iteration)
                     break
                 self._increment_run_counter(kb_path, "planner_calls")
-                plan = self._canonicalize_markdown_result("llm_plan_proposal", proposal_task.result or {})
+                plan = self._canonicalize_markdown_result("llm_plan_benchmark", proposal_task.result or {})
                 proposal_task.result = plan
                 self._append_planner_outputs(kb_path=kb_path, iteration=iteration, plan=plan)
                 knowledge_base = self._load_kb(kb_path)
@@ -443,7 +443,7 @@ class Orchestrator:
         write_json(kb_path, kb)
 
     def _append_planner_outputs(self, kb_path: Path, iteration: int, plan: dict[str, Any]) -> None:
-        plan = self._canonicalize_markdown_result("llm_plan_proposal", plan)
+        plan = self._canonicalize_markdown_result("llm_plan_benchmark", plan)
         kb = self._load_kb(kb_path)
         kb.setdefault("planner_history", [])
         proposal = plan.get("proposal", {})
@@ -476,7 +476,7 @@ class Orchestrator:
             normalized["unanswered_questions"] = parsed.get("unanswered_questions", [])
             normalized["findings"] = parsed.get("findings", [])
             return normalized
-        if task_kind == "llm_plan_proposal":
+        if task_kind == "llm_plan_benchmark":
             return normalized
         if task_kind == "llm_analyze_update":
             parsed = parse_analysis_markdown(self._read_artifact_text(result.get("artifact_md")))
@@ -680,8 +680,8 @@ class Orchestrator:
                 return f"Please decide what research we need next{iteration}.{self._intent_sentence(intent)}"
             if task.kind == "llm_research":
                 return f"Please research the current open questions{iteration}."
-            if task.kind == "llm_plan_proposal":
-                return f"Please propose the next benchmark{iteration}.{self._intent_sentence(intent)}"
+            if task.kind == "llm_plan_benchmark":
+                return f"Please plan the next benchmark{iteration}.{self._intent_sentence(intent)}"
             if task.kind == "llm_generate_implementation":
                 return f"Please turn the current frontier question into an executable benchmark{iteration}."
             if task.kind == "execute_implementation":
@@ -707,8 +707,8 @@ class Orchestrator:
             if request_summary:
                 base += f" I focused on: {request_summary}"
             return self._sentence_with_reason(base, reason)
-        if task.kind == "llm_plan_proposal":
-            return self._sentence_with_reason("I prepared the next benchmark proposal.", reason)
+        if task.kind == "llm_plan_benchmark":
+            return self._sentence_with_reason("I prepared the next benchmark plan.", reason)
         if task.kind == "llm_generate_implementation":
             accepted = len(result.get("benchmarks", []))
             rejected = len(result.get("rejected_benchmarks", []))
@@ -791,7 +791,7 @@ class Orchestrator:
             return []
         if task_kind == "llm_research":
             return [("Research notes", "artifact_md")]
-        if task_kind == "llm_plan_proposal":
+        if task_kind == "llm_plan_benchmark":
             return []
         if task_kind == "llm_generate_implementation":
             return [
@@ -940,7 +940,7 @@ class Orchestrator:
             return [("research-request-raw", "research_request_raw_artifact")]
         if task_kind == "llm_research":
             return [("research-raw", "raw_artifact"), ("research-memo", "artifact_md")]
-        if task_kind == "llm_plan_proposal":
+        if task_kind == "llm_plan_benchmark":
             return [("proposal-raw", "proposal_raw_artifact")]
         if task_kind == "llm_generate_implementation":
             return [

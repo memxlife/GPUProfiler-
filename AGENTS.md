@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Purpose and Design Alignment
-This repository should follow the philosophy in `design_phi.md`: build an autonomous, self-evolving research system, not a rigid scripted tool.
+This repository should follow the philosophy in `docs/design_phi.md`: build an autonomous, self-evolving research system, not a rigid scripted tool.
 
 Contributor rule of thumb:
 - preserve autonomy,

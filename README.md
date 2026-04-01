@@ -1,28 +1,19 @@
-# Minimal Python CLI Todo
+# GPUProfiler
 
-A tiny todo CLI built with `argparse` and JSON storage.
+Autonomous local-first GPU research and profiling infrastructure.
 
-For the current autonomous GPU research system contract, see `BUILD_PROMPT.md`.
-For the markdown-first artifact transition, see `MARKDOWN_ARTIFACT_SPEC.md`.
-For the textbook-style knowledge-base direction, see `KNOWLEDGE_BASE_TEMPLATE.md` and `KNOWLEDGE_BASE_EXAMPLE.md`.
+For the current autonomous GPU research system contract, see `docs/BUILD_PROMPT.md`.
+For the markdown-first artifact transition, see `docs/MARKDOWN_ARTIFACT_SPEC.md`.
+For the textbook-style knowledge-base direction, see `docs/KNOWLEDGE_BASE_TEMPLATE.md` and `docs/KNOWLEDGE_BASE_EXAMPLE.md`.
+For the repository layout, see `docs/PROJECT_STRUCTURE.md`.
 
-## Commands
+## Project Layout
 
-- `python todo.py add "buy milk"`
-- `python todo.py list`
-- `python todo.py done 0`
-
-Data is stored in `todos.json` in the current working directory.
-
-## GPU Auto Profiling Infra
-
-Package layout:
-- `gpu_profiler/agents.py`
-- `gpu_profiler/orchestrator.py`
-- `gpu_profiler/store.py`
-- `gpu_profiler/models.py`
-- `gpu_profiler/cli.py`
-- `gpu_autoprofile.py` (entrypoint)
+- `gpu_profiler/`: runtime orchestration and agent code
+- `tests/`: repo tests
+- `docs/`: design, build contract, KB template, and artifact conventions
+- `scripts/`: local diagnostics and OpenAI probe utilities
+- `gpu_autoprofile.py`: CLI entrypoint
 
 Run a multi-agent profiling cycle:
 
@@ -68,7 +59,7 @@ Minimal OpenAI connectivity diagnostic:
 
 ```bash
 source ./set_key.sh
-python openai_ping.py --model gpt-5.4 --timeout 20 --retries 1
+python scripts/openai_ping.py --model gpt-5.4 --timeout 20 --retries 1
 ```
 
 Default autonomous modeling dimensions are fine-grained and include compute and memory hierarchy signals

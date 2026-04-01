@@ -26,7 +26,7 @@ def run_cli(tmp_path: Path, *args: str) -> dict:
 
 
 def copy_app(tmp_path: Path) -> None:
-    root = Path(__file__).parent
+    root = Path(__file__).resolve().parent.parent
     (tmp_path / "gpu_autoprofile.py").write_text((root / "gpu_autoprofile.py").read_text(encoding="utf-8"), encoding="utf-8")
     shutil.copytree(root / "gpu_profiler", tmp_path / "gpu_profiler")
 
@@ -74,7 +74,7 @@ def test_autonomous_run_produces_kb_centric_artifacts(tmp_path):
     kinds = [item["kind"] for item in run_log]
     assert "llm_plan_research" in kinds
     assert "llm_research" in kinds
-    assert "llm_plan_proposal" in kinds
+    assert "llm_plan_benchmark" in kinds
     assert "llm_generate_implementation" in kinds
     assert "execute_implementation" in kinds
     assert "llm_analyze_update" in kinds
