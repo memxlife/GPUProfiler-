@@ -13,11 +13,11 @@ The orchestrator should prefer parsing markdown artifacts with deterministic sec
 
 Per iteration, the preferred canonical research artifacts are:
 
-- `research_request.md`
-- `proposal.md`
 - `research.md`
 - `implementation.md`
 - `analysis.md`
+
+The canonical semantic source of truth is the markdown knowledge base under `knowledge_base/`.
 
 Operational sidecars may still exist during transition, but they are not the long-term source of truth for meaning.
 
@@ -39,38 +39,12 @@ Avoid:
 - large embedded JSON blocks
 - freeform structure with no stable anchors
 
-## research_request.md
-
-Required sections:
-
-- `## Metadata`
-- `## Objective`
-- `## Target Nodes`
-- `## Questions`
-- `## Search Topics`
-- `## Expected Outputs`
-
-## proposal.md
-
-Required sections:
-
-- `## Metadata`
-- `## Proposal Summary`
-- `## Target Nodes`
-- `## Proposed Benchmarks`
-
-Each benchmark should use a `### Benchmark N` subsection with:
-
-- scalar fields such as `id`, `title`, `benchmark role`, `objective`, `hypothesis`, `rationale`
-- `#### Target Nodes`
-- `#### Required Evidence`
-- `#### What Success Unlocks`
-
 ## research.md
 
 Required sections:
 
 - `## Metadata`
+- `## Current Question`
 - `## Request Summary`
 - `## Proposed Dimensions`
 - `## Unanswered Questions`
@@ -123,6 +97,7 @@ Each claim should use a `### Claim N` subsection with:
 During migration:
 
 - existing JSON sidecars may remain for compatibility
+- planning should rely on the KB plus the selected current question, not separate proposal/request memos
 - markdown should become more detailed, not less
 - parsers should read markdown first when possible
 - JSON should be derived from markdown or used only for operational records

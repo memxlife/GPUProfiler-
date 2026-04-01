@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .markdown_artifacts import parse_proposal_markdown, parse_research_request_markdown
 from .llm import (
     CODEGEN_SYSTEM_PROMPT,
     HeuristicWorkflowBackend,
@@ -16,6 +15,7 @@ from .llm import (
     _enforce_payload_budget,
     _proposal_focus_nodes,
     _render_codegen_prompt,
+    _slugify_dimension,
     _trim_codegen_payload,
     _trim_text,
     CODEGEN_INPUT_HARD_CAP_CHARS,
@@ -111,17 +111,7 @@ class LLMPlanningAgent(Agent):
                 "current_question": decision.current_question,
                 "research_request": decision.research_request,
             }
-            research_request_path = iter_dir / "research_request.json"
-            research_request_md_path = iter_dir / "research_request.md"
             research_request_raw_path = iter_dir / "research_request_raw.md"
-            if isinstance(decision.research_request, dict):
-                write_json(research_request_path, decision.research_request)
-                write_text(research_request_md_path, _render_research_request_md(result))
-                result["research_request_artifact"] = str(research_request_md_path)
-                result["research_request_meta_artifact"] = str(research_request_path)
-            else:
-                result["research_request_artifact"] = None
-                result["research_request_meta_artifact"] = None
             if decision.raw_response:
                 write_text(research_request_raw_path, decision.raw_response)
                 result["research_request_raw_artifact"] = str(research_request_raw_path)
@@ -150,15 +140,9 @@ class LLMPlanningAgent(Agent):
                 "proposal": decision.proposal,
                 "knowledge_model_artifact": task.payload.get("knowledge_model_artifact"),
             }
-            proposal_path = iter_dir / "proposal.json"
-            proposal_md_path = iter_dir / "proposal.md"
             proposal_raw_path = iter_dir / "proposal_raw.md"
-            write_json(proposal_path, decision.proposal)
-            write_text(proposal_md_path, _render_proposal_md(plan))
             if decision.raw_response:
                 write_text(proposal_raw_path, decision.raw_response)
-            plan["proposal_artifact"] = str(proposal_path)
-            plan["proposal_md_artifact"] = str(proposal_md_path)
             plan["proposal_raw_artifact"] = str(proposal_raw_path) if decision.raw_response else None
             return plan
 
@@ -180,24 +164,8 @@ class LLMPlanningAgent(Agent):
             "research_request": decision.research_request,
         }
         model_path = iter_dir / "knowledge_model.json"
-        proposal_path = iter_dir / "proposal.json"
-        proposal_md_path = iter_dir / "proposal.md"
-        research_request_path = iter_dir / "research_request.json"
-        research_request_md_path = iter_dir / "research_request.md"
         write_json(model_path, decision.knowledge_model)
-        write_json(proposal_path, decision.proposal)
-        write_text(proposal_md_path, _render_proposal_md(plan))
-        if isinstance(decision.research_request, dict):
-            write_json(research_request_path, decision.research_request)
-            write_text(research_request_md_path, _render_research_request_md(plan))
-            plan["research_request_artifact"] = str(research_request_md_path)
-            plan["research_request_meta_artifact"] = str(research_request_path)
-        else:
-            plan["research_request_artifact"] = None
-            plan["research_request_meta_artifact"] = None
         plan["knowledge_model_artifact"] = str(model_path)
-        plan["proposal_artifact"] = str(proposal_path)
-        plan["proposal_md_artifact"] = str(proposal_md_path)
         return plan
 
 
@@ -251,19 +219,26 @@ class LLMResearchAgent(Agent):
     def run(self, task: Task, ctx: AgentContext) -> dict[str, Any]:
         iteration = int(task.payload.get("iteration", 0))
         kb = task.payload.get("knowledge_base", {})
-        request_path = task.payload.get("research_request_artifact")
-        if not request_path:
-            raise ValueError("llm_research requires research_request_artifact")
-        request_memo = _read_text_artifact(request_path)
-        request_meta_path = task.payload.get("research_request_meta_artifact")
-        meta_path = Path(request_meta_path) if request_meta_path else None
-        research_request = read_json(meta_path, {}) if meta_path else {}
-        if not isinstance(research_request, dict) or not research_request:
-            research_request = parse_research_request_markdown(request_memo)
-        if not isinstance(research_request, dict) or not research_request.get("request_summary", "").strip():
-            raise ValueError("research_request_artifact did not contain a valid request object")
+        research_request = task.payload.get("research_request", {})
+        if not isinstance(research_request, dict):
+            research_request = {}
+        current_question = str(task.payload.get("current_question", "")).strip()
+        if not research_request:
+            research_request = _research_request_from_question(
+                intent=str(task.payload.get("intent", "")).strip(),
+                current_question=current_question,
+            )
         intent = str(research_request.get("intent_summary", task.payload.get("intent", ""))).strip()
         max_sources = int(task.payload.get("max_sources", 8))
+        request_memo = _render_research_request_md(
+            {
+                "iteration": iteration,
+                "planner": task.payload.get("planner"),
+                "reason": task.payload.get("reason"),
+                "current_question": current_question,
+                "research_request": research_request,
+            }
+        )
         decision = self.workflow_backend.research_context(
             intent=intent,
             kb=kb,
@@ -281,8 +256,7 @@ class LLMResearchAgent(Agent):
             "unanswered_questions": decision.unanswered_questions,
             "findings": decision.findings,
             "proposed_dimensions": decision.proposed_dimensions,
-            "research_request_artifact": str(request_path),
-            "research_request_meta_artifact": str(meta_path) if meta_path else None,
+            "current_question": current_question,
         }
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
         iter_dir.mkdir(parents=True, exist_ok=True)
@@ -316,15 +290,12 @@ class LLMCodegenAgent(Agent):
         max_benchmarks = int(task.payload.get("max_benchmarks", 2))
         amendment_round = int(task.payload.get("amendment_round", 0))
         amendment_feedback = task.payload.get("amendment_feedback", [])
-        proposal_memo = _read_text_artifact(plan.get("proposal_md_artifact"))
-        if not isinstance(plan.get("proposal", {}), dict) or not plan.get("proposal", {}):
-            parsed_proposal = parse_proposal_markdown(proposal_memo)
-            if parsed_proposal.get("proposals"):
-                plan = {**plan, "proposal": parsed_proposal}
-        working_proposal_memo = proposal_memo
+        working_proposal_memo = _build_planning_context_memo(plan=plan, kb=kb)
 
         prompt_sections: list[str] = []
         focus = _proposal_focus_nodes(plan.get("proposal", {}))[: max(1, max_benchmarks)]
+        if not focus:
+            focus = _planning_focus_nodes(plan=plan, kb=kb)[: max(1, max_benchmarks)]
         if not focus:
             focus = [f"dimension_{iteration + 1}"]
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
@@ -369,7 +340,7 @@ class LLMCodegenAgent(Agent):
             if not failure_notes:
                 break
             preflight_feedback.append(failure_notes)
-            working_proposal_memo = _append_codegen_feedback(proposal_memo, preflight_feedback)
+            working_proposal_memo = _append_codegen_feedback(working_proposal_memo, preflight_feedback)
         else:
             generated_files = []
 
@@ -1210,9 +1181,6 @@ def _build_feasibility_report(
     accepted: list[dict[str, Any]], rejected: list[dict[str, Any]], proposal: dict[str, Any]
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
-    proposal_artifact = ""
-    if isinstance(proposal, dict):
-        proposal_artifact = str(proposal.get("artifact", "")).strip()
     for item in accepted:
         benchmark_id = str(item.get("id", "")).strip()
         complexity = str(item.get("implementation_complexity", "medium")).strip() or "medium"
@@ -1262,7 +1230,6 @@ def _build_feasibility_report(
         "not_feasible_count": sum(1 for item in items if item.get("feasibility_status") == "not_feasible"),
     }
     return {
-        "proposal_artifact": proposal_artifact,
         "items": items,
         "summary": summary,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1470,6 +1437,9 @@ def _render_research_md(research: dict[str, Any]) -> str:
         f"- planner: `{research.get('planner')}`",
         f"- reason: {research.get('reason')}",
         "",
+        "## Current Question",
+        str(research.get("current_question", "")).strip() or "No current question recorded.",
+        "",
         "## Request Summary",
         str(research.get("request_summary", "")).strip() or "No request summary recorded.",
         "",
@@ -1502,6 +1472,59 @@ def _render_research_md(research: dict[str, Any]) -> str:
         )
     if not research.get("findings", []):
         lines.append("No findings recorded.")
+    return "\n".join(lines)
+
+
+def _research_request_from_question(intent: str, current_question: str) -> dict[str, Any]:
+    question = str(current_question).strip()
+    if not question:
+        question = "What evidence is needed to advance the current GPU knowledge frontier?"
+    target = _slugify_dimension(question) or "gpu_frontier"
+    return {
+        "intent_summary": intent,
+        "request_summary": f"Gather external context that helps answer: {question}",
+        "target_nodes": [target],
+        "target_questions": [question],
+        "search_topics": [question],
+        "source_preferences": ["vendor_doc", "official_tool_doc", "paper", "article"],
+        "expected_outputs": ["mechanism summary", "measurement guidance", "open questions"],
+    }
+
+
+def _planning_focus_nodes(plan: dict[str, Any], kb: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    question = str(plan.get("current_question", "")).strip()
+    slug = _slugify_dimension(question)
+    if slug:
+        out.append(slug)
+    latest_research = kb.get("latest_research", {}) if isinstance(kb.get("latest_research", {}), dict) else {}
+    for item in latest_research.get("proposed_dimensions", []):
+        text = str(item).strip()
+        if text and text not in out:
+            out.append(text)
+    for item in kb.get("covered_dimensions", []) if isinstance(kb.get("covered_dimensions", []), list) else []:
+        text = str(item).strip()
+        if text and text not in out:
+            out.append(text)
+    return out[:6]
+
+
+def _build_planning_context_memo(plan: dict[str, Any], kb: dict[str, Any]) -> str:
+    question = str(plan.get("current_question", "")).strip() or "No current question recorded."
+    reason = str(plan.get("reason", "")).strip() or "No explicit planner rationale recorded."
+    latest_research = kb.get("latest_research", {}) if isinstance(kb.get("latest_research", {}), dict) else {}
+    research_memo = _read_text_artifact(latest_research.get("artifact_md"))
+    lines = [
+        "# Planning Context",
+        "",
+        "## Current Question",
+        question,
+        "",
+        "## Planner Rationale",
+        reason,
+    ]
+    if research_memo.strip():
+        lines.extend(["", "## Latest Research", research_memo.strip()])
     return "\n".join(lines)
 
 

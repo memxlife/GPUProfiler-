@@ -49,8 +49,7 @@ Autonomous artifacts include:
 - `knowledge_base/` (markdown textbook-style knowledge base, frontier, and local findings)
 - `autonomous_report.md`
 - `iterations/iter_XX/knowledge_model.json` (planner-owned knowledge hierarchy)
-- `iterations/iter_XX/proposal.json` and `proposal.md` (planner-owned non-executable proposal)
-- `iterations/iter_XX/research_request.json` plus `research.json` and `research.md` (planner-directed search handoff and results)
+- `iterations/iter_XX/research.json` and `research.md` (optional frontier-directed external research results)
 - `iterations/iter_XX/implementation.json` and `implementation.md` (LLM code generator output)
 - `iterations/iter_XX/feasibility_report.json` (codegen feasibility and complexity assessment)
 - `iterations/iter_XX/execution_results.json` and `execution.md` (runner evidence-preserving execution record)
@@ -77,10 +76,10 @@ Default autonomous modeling dimensions are fine-grained and include compute and 
 
 Autonomous loop structure:
 1. LLM schema-contract agent negotiates shared JSON structure for planner/codegen/analysis outputs.
-2. LLM planner produces a knowledge model, a non-executable proposal, and an optional research request from intent + knowledge base.
-3. LLM search agent executes the planner-issued research request and returns sourced research artifacts.
-4. LLM planner refines the proposal using the research results when search was requested.
-5. LLM code generator creates concrete benchmark implementation artifacts from the planner proposal.
+2. LLM planner reads the knowledge base, selects the next frontier question, and decides whether optional external research is needed.
+3. LLM search agent performs frontier-directed research when requested and returns sourced research artifacts.
+4. LLM planner prepares internal benchmark-planning state from the current question, knowledge base, and optional research results.
+5. LLM code generator creates concrete benchmark implementation artifacts from the current question plus KB context.
 6. Benchmark executor runs the generated implementation and collects artifacts.
 7. LLM analysis agent extracts claims, updates knowledge base, and decides whether to continue.
 8. Repeat until planner/analysis stops or max iteration count is reached.

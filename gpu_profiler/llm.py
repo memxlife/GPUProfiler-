@@ -1940,6 +1940,7 @@ def _render_codegen_prompt(payload: dict[str, Any]) -> str:
     proposal = plan.get("proposal", {}) if isinstance(plan.get("proposal", {}), dict) else {}
     proposal_items = proposal.get("proposals", []) if isinstance(proposal.get("proposals", []), list) else []
     item = proposal_items[0] if proposal_items else {}
+    current_question = str(plan.get("current_question", "")).strip() or "No current question recorded."
     tools = ", ".join(sorted(str(k) for k, v in (kb.get("available_tools", {}) or {}).items() if v)) or "none"
     relevant_nodes = kb.get("relevant_knowledge_nodes", []) if isinstance(kb.get("relevant_knowledge_nodes", []), list) else []
     node_summary = "\n".join(
@@ -1952,11 +1953,13 @@ def _render_codegen_prompt(payload: dict[str, Any]) -> str:
         f"Iteration: {payload.get('iteration', 0)}\n"
         f"Target dimension: {payload.get('dimension', '')}\n"
         f"Available tools: {tools}\n\n"
+        "Current frontier question:\n"
+        f"{current_question}\n\n"
         "Relevant knowledge:\n"
         f"{node_summary}\n\n"
-        "Proposal memo:\n"
-        f"{str(payload.get('proposal_memo', '')).strip() or 'No proposal memo provided.'}\n\n"
-        "Relevant proposal item:\n"
+        "Planning context:\n"
+        f"{str(payload.get('proposal_memo', '')).strip() or 'No additional planning context provided.'}\n\n"
+        "Relevant internal benchmark-plan item:\n"
         f"- title: {str(item.get('title', '')).strip()}\n"
         f"- objective: {str(item.get('objective', '')).strip()}\n"
         f"- benchmark role: {str(item.get('benchmark_role', '')).strip()}\n"
@@ -2042,6 +2045,7 @@ def _compact_codegen_plan(plan: dict[str, Any], dimension: str) -> dict[str, Any
     return {
         "iteration": plan.get("iteration"),
         "planner": _trim_text(plan.get("planner", ""), 64),
+        "current_question": _trim_text(plan.get("current_question", ""), 220),
         "proposal": {
             "intent_summary": _trim_text(proposal.get("intent_summary", ""), 160),
             "proposal_summary": _trim_text(proposal.get("proposal_summary", ""), 180),

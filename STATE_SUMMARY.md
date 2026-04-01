@@ -27,11 +27,11 @@ The current autonomous flow is:
 
 Key architectural decisions now implemented:
 
-- planner is split into research-request planning and proposal planning
-- persistent `knowledge_model.json` lives at the run root
-- analyzer updates the knowledge model incrementally
-- planner/search/codegen handoffs are moving to memo-first `.md` artifacts
-- thin JSON sidecars remain for orchestration
+- the markdown knowledge base is the central semantic memory
+- planner selects the next frontier question from the KB and unmet frontier criteria
+- external research is optional and question-driven
+- proposal and research-request artifacts are no longer first-class runtime outputs
+- thin JSON sidecars remain for orchestration and debugging
 
 ## Current Artifact Model
 
@@ -46,12 +46,8 @@ Per iteration:
 
 - `schema_contract.json`
 - `schema_contract.md`
-- `research_request.md`
-- `research_request.json`
 - `research.json`
 - `research.md`
-- `proposal.json`
-- `proposal.md`
 - `implementation.json`
 - `implementation.md`
 - `feasibility_report.json`
@@ -64,16 +60,10 @@ Per iteration:
 ## What Is Working
 
 1. Structural orchestration works end to end in heuristic mode.
-2. Planner split is live and validated.
-3. Schema contract now matches split planner outputs:
-   - `research_request_output`
-   - `proposal_output`
-4. Persistent root `knowledge_model.json` exists and is updated through analysis.
-5. Planner/search/codegen memo artifacts are emitted:
-   - `research_request.md`
-   - `proposal.md`
-6. Tests currently pass:
-   - `pytest -q` -> `12 passed`
+2. Planner frontier selection is live and KB-driven.
+3. Persistent root `knowledge_model.json` exists and is updated through analysis.
+4. Runtime markdown KB updates now rewrite chapter sections directly.
+5. External research and codegen both consume the selected frontier question instead of standalone request/proposal memos.
 
 ## What Is Still Not Working Well
 
@@ -154,8 +144,8 @@ If you test elsewhere, inspect these first:
    - whether `llm_plan_proposal` succeeds with OpenAI
    - whether `llm_generate_implementation` succeeds with OpenAI
 
-2. `research_request.md`
-3. `proposal.md`
+2. `knowledge_base/frontier.md`
+3. `research.md`
 4. `implementation.md`
 5. `execution_results.json`
 6. `analysis_update.json`

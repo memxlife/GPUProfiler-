@@ -12,9 +12,7 @@ from .knowledge_base import initialize_markdown_knowledge_base
 from .llm import HeuristicWorkflowBackend, OpenAIWorkflowBackend, ResilientWorkflowBackend
 from .markdown_artifacts import (
     parse_analysis_markdown,
-    parse_proposal_markdown,
     parse_research_markdown,
-    parse_research_request_markdown,
 )
 from .models import AgentContext, RetryPolicy, Task
 from .store import write_json
@@ -169,8 +167,8 @@ class Orchestrator:
                 research_plan_task.result = research_plan
                 self._append_planner_research_outputs(kb_path=kb_path, iteration=iteration, result=research_plan)
                 knowledge_base = self._load_kb(kb_path)
-                research_request_artifact = research_plan.get("research_request_artifact")
-                if research_request_artifact:
+                research_request = research_plan.get("research_request", {})
+                if isinstance(research_request, dict) and research_request:
                     research_task = Task(
                         id=f"iter{iteration}-llm-research-0",
                         kind="llm_research",
@@ -178,8 +176,10 @@ class Orchestrator:
                             "intent": intent,
                             "iteration": iteration,
                             "knowledge_base": knowledge_base,
-                            "research_request_artifact": research_request_artifact,
-                            "research_request_meta_artifact": research_plan.get("research_request_meta_artifact"),
+                            "planner": research_plan.get("planner"),
+                            "reason": research_plan.get("reason"),
+                            "current_question": research_plan.get("current_question"),
+                            "research_request": research_request,
                             "max_sources": 10,
                         },
                     )
@@ -426,18 +426,17 @@ class Orchestrator:
     def _append_planner_research_outputs(self, kb_path: Path, iteration: int, result: dict[str, Any]) -> None:
         result = self._canonicalize_markdown_result("llm_plan_research", result)
         kb = self._load_kb(kb_path)
-        kb.setdefault("proposal_history", [])
+        kb.setdefault("planner_history", [])
         research_request = result.get("research_request", {}) if isinstance(result.get("research_request", {}), dict) else {}
-        kb["proposal_history"].append(
+        kb["current_question"] = result.get("current_question")
+        kb["planner_history"].append(
             {
                 "iteration": iteration,
+                "phase": "question_selection",
                 "planner": result.get("planner"),
                 "reason": result.get("reason"),
                 "current_question": result.get("current_question"),
-                "research_request_artifact": result.get("research_request_artifact"),
-                "research_request_meta_artifact": result.get("research_request_meta_artifact"),
                 "research_request": research_request,
-                "proposal": None,
                 "timestamp": time.time(),
             }
         )
@@ -446,17 +445,17 @@ class Orchestrator:
     def _append_planner_outputs(self, kb_path: Path, iteration: int, plan: dict[str, Any]) -> None:
         plan = self._canonicalize_markdown_result("llm_plan_proposal", plan)
         kb = self._load_kb(kb_path)
-        kb.setdefault("proposal_history", [])
+        kb.setdefault("planner_history", [])
         proposal = plan.get("proposal", {})
+        kb["current_question"] = plan.get("current_question")
         kb["current_proposal"] = proposal if isinstance(proposal, dict) else {}
-        kb["proposal_history"].append(
+        kb["planner_history"].append(
             {
                 "iteration": iteration,
+                "phase": "benchmark_planning",
                 "planner": plan.get("planner"),
                 "reason": plan.get("reason"),
                 "current_question": plan.get("current_question"),
-                "artifact": plan.get("proposal_artifact"),
-                "artifact_md": plan.get("proposal_md_artifact"),
                 "proposal": proposal if isinstance(proposal, dict) else {},
                 "timestamp": time.time(),
             }
@@ -468,9 +467,6 @@ class Orchestrator:
             return {}
         normalized = dict(result)
         if task_kind == "llm_plan_research":
-            parsed = parse_research_request_markdown(self._read_artifact_text(result.get("research_request_artifact")))
-            if any(parsed.values()):
-                normalized["research_request"] = parsed
             return normalized
         if task_kind == "llm_research":
             parsed = parse_research_markdown(self._read_artifact_text(result.get("artifact_md")))
@@ -481,9 +477,6 @@ class Orchestrator:
             normalized["findings"] = parsed.get("findings", [])
             return normalized
         if task_kind == "llm_plan_proposal":
-            parsed = parse_proposal_markdown(self._read_artifact_text(result.get("proposal_md_artifact")))
-            if parsed.get("proposal_summary", "").strip() or parsed.get("proposals"):
-                normalized["proposal"] = parsed
             return normalized
         if task_kind == "llm_analyze_update":
             parsed = parse_analysis_markdown(self._read_artifact_text(result.get("artifact_md")))
@@ -690,7 +683,7 @@ class Orchestrator:
             if task.kind == "llm_plan_proposal":
                 return f"Please propose the next benchmark{iteration}.{self._intent_sentence(intent)}"
             if task.kind == "llm_generate_implementation":
-                return f"Please turn the current proposal into an executable benchmark{iteration}."
+                return f"Please turn the current frontier question into an executable benchmark{iteration}."
             if task.kind == "execute_implementation":
                 return f"Please execute the current benchmark plan{iteration}."
             if task.kind == "llm_analyze_update":
@@ -795,11 +788,11 @@ class Orchestrator:
 
     def _conversation_artifact_keys_for_task(self, task_kind: str) -> list[tuple[str, str]]:
         if task_kind == "llm_plan_research":
-            return [("Research request", "research_request_artifact")]
+            return []
         if task_kind == "llm_research":
             return [("Research notes", "artifact_md")]
         if task_kind == "llm_plan_proposal":
-            return [("Proposal", "proposal_md_artifact")]
+            return []
         if task_kind == "llm_generate_implementation":
             return [
                 ("Prompt I used", "prompt_artifact"),
@@ -944,14 +937,11 @@ class Orchestrator:
         if task_kind == "llm_schema_contract":
             return [("schema-contract", "artifact_md"), ("schema-contract-json", "artifact")]
         if task_kind == "llm_plan_research":
-            return [
-                ("research-request-raw", "research_request_raw_artifact"),
-                ("research-request", "research_request_artifact"),
-            ]
+            return [("research-request-raw", "research_request_raw_artifact")]
         if task_kind == "llm_research":
             return [("research-raw", "raw_artifact"), ("research-memo", "artifact_md")]
         if task_kind == "llm_plan_proposal":
-            return [("proposal-raw", "proposal_raw_artifact"), ("proposal-memo", "proposal_md_artifact")]
+            return [("proposal-raw", "proposal_raw_artifact")]
         if task_kind == "llm_generate_implementation":
             return [
                 ("implementation-prompt", "prompt_artifact"),
