@@ -1,0 +1,4 @@
+interface:
+  display_name: "Book Builder"
+  short_description: "Author and maintain the canonical GPU research book"
+  default_prompt: "Use $book-builder to initialize or consolidate the canonical GPU knowledge book."

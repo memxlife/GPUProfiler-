@@ -1,4 +1,3 @@
-import json
 import shutil
 import sys
 import time
@@ -8,14 +7,17 @@ from pathlib import Path
 from typing import Any
 
 from .agents import Agent, default_agents
-from ..knowledge.knowledge_base import initialize_markdown_knowledge_base
+from ..knowledge.knowledge_base import (
+    initialize_markdown_knowledge_base,
+    update_question_context,
+)
 from ..workflow.llm import HeuristicWorkflowBackend, OpenAIWorkflowBackend, ResilientWorkflowBackend
 from ..knowledge.markdown_artifacts import (
     parse_analysis_markdown,
     parse_research_markdown,
 )
 from ..core.models import AgentContext, RetryPolicy, Task
-from ..core.store import write_json
+from ..core.store import read_data_artifact, write_data_artifact, write_text
 
 DEFAULT_TARGET_DIMENSIONS: list[str] = []
 
@@ -93,6 +95,7 @@ class Orchestrator:
         target_coverage: float = 0.9,
         target_dimensions: list[str] | None = None,
     ) -> dict[str, Any]:
+        intent = self._normalize_intent_text(intent)
         run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
         run_dir = Path(out_dir) / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -131,12 +134,24 @@ class Orchestrator:
                 "current_knowledge_model": initial_knowledge_model,
                 **kb_files,
             }
-            kb_path = run_dir / "run_state.json"
-            write_json(kb_path, knowledge_base)
+            kb_path = run_dir / "run_state.md"
+            write_data_artifact(kb_path, knowledge_base, title="Run State")
 
             completed: list[Task] = []
             sys_task = Task(id="boot-collect_system_info-0", kind="collect_system_info", payload={})
             completed.append(self._run_with_retry(sys_task, ctx))
+            book_task = Task(
+                id="boot-book-builder-0",
+                kind="book_build_update",
+                payload={
+                    "intent": intent,
+                    "iteration": 0,
+                    "kb_path": str(kb_path),
+                    "mode": "initialize",
+                    "proposed_follow_up_questions": [],
+                },
+            )
+            completed.append(self._run_with_retry(book_task, ctx))
             self._persist_run_log(run_dir, completed)
 
             for iteration in range(max_iterations):
@@ -304,6 +319,21 @@ class Orchestrator:
 
                 analysis_result = self._canonicalize_markdown_result("llm_analyze_update", analysis_task.result or {})
                 analysis_task.result = analysis_result
+                book_task = Task(
+                    id=f"iter{iteration}-book-builder-0",
+                    kind="book_build_update",
+                    payload={
+                        "intent": intent,
+                        "iteration": iteration,
+                        "kb_path": str(kb_path),
+                        "proposed_follow_up_questions": analysis_result.get("proposed_follow_up_questions", []),
+                    },
+                )
+                completed.append(self._run_with_retry(book_task, ctx))
+                self._persist_run_log(run_dir, completed)
+                if book_task.status != "done":
+                    self._update_run_state(kb_path, status="stopped", reason="book_builder_failed", iteration=iteration)
+                    break
                 veto_next_plan = bool(analysis_result.get("veto_next_plan", False))
                 if float(analysis_result.get("coverage_score", 0.0)) >= target_coverage and not veto_next_plan:
                     self._update_run_state(kb_path, status="stopped", reason="target_coverage_reached", iteration=iteration + 1)
@@ -330,9 +360,7 @@ class Orchestrator:
             self._close_run_debug_log()
 
     def _load_kb(self, kb_path: Path) -> dict[str, Any]:
-        if not kb_path.exists():
-            return {}
-        return json.loads(kb_path.read_text(encoding="utf-8"))
+        return read_data_artifact(kb_path, {})
 
     def _detect_available_tools(self) -> dict[str, bool]:
         tools = [
@@ -346,6 +374,16 @@ class Orchestrator:
             "nvbench",
         ]
         return {tool: shutil.which(tool) is not None for tool in tools}
+
+    def _normalize_intent_text(self, intent: str) -> str:
+        lines = str(intent or "").splitlines()
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        if lines and lines[0].lstrip().startswith("#"):
+            lines.pop(0)
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        return "\n".join(lines).strip()
 
     def _max_amendments(self, schema_contract: dict[str, Any]) -> int:
         negotiation = schema_contract.get("negotiation_policy", {}) if isinstance(schema_contract, dict) else {}
@@ -373,7 +411,7 @@ class Orchestrator:
                 "timestamp": time.time(),
             }
         )
-        write_json(kb_path, kb)
+        write_data_artifact(kb_path, kb, title="Run State")
 
     def _append_research_history(self, kb_path: Path, iteration: int, research: dict[str, Any]) -> None:
         research = self._canonicalize_markdown_result("llm_research", research)
@@ -415,7 +453,12 @@ class Orchestrator:
             "findings_count": len(findings) if isinstance(findings, list) else 0,
             "proposed_dimensions": research.get("proposed_dimensions", []),
         }
-        write_json(kb_path, kb)
+        current_question = str(kb.get("current_question", "")).strip()
+        context = self._research_context_text(research)
+        if current_question and context:
+            kb_files = update_question_context(kb, question_text=current_question, context=context)
+            kb.update(kb_files)
+        write_data_artifact(kb_path, kb, title="Run State")
 
     def _append_planner_research_outputs(self, kb_path: Path, iteration: int, result: dict[str, Any]) -> None:
         result = self._canonicalize_markdown_result("llm_plan_research", result)
@@ -434,7 +477,7 @@ class Orchestrator:
                 "timestamp": time.time(),
             }
         )
-        write_json(kb_path, kb)
+        write_data_artifact(kb_path, kb, title="Run State")
 
     def _append_planner_outputs(self, kb_path: Path, iteration: int, plan: dict[str, Any]) -> None:
         plan = self._canonicalize_markdown_result("llm_plan_benchmark", plan)
@@ -454,7 +497,7 @@ class Orchestrator:
                 "timestamp": time.time(),
             }
         )
-        write_json(kb_path, kb)
+        write_data_artifact(kb_path, kb, title="Run State")
 
     def _canonicalize_markdown_result(self, task_kind: str, result: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(result, dict):
@@ -486,6 +529,27 @@ class Orchestrator:
             return normalized
         return normalized
 
+    def _research_context_text(self, research: dict[str, Any]) -> str:
+        request_summary = str(research.get("request_summary", "")).strip()
+        findings = research.get("findings", []) if isinstance(research.get("findings", []), list) else []
+        unanswered = research.get("unanswered_questions", []) if isinstance(research.get("unanswered_questions", []), list) else []
+        parts: list[str] = []
+        if request_summary:
+            parts.append(request_summary)
+        if findings:
+            finding_summaries = [
+                f"{str(item.get('title', '')).strip()}: {str(item.get('summary', '')).strip()}".strip(": ")
+                for item in findings[:3]
+                if isinstance(item, dict) and (str(item.get("title", "")).strip() or str(item.get("summary", "")).strip())
+            ]
+            if finding_summaries:
+                parts.append("Research findings: " + " | ".join(finding_summaries))
+        if unanswered:
+            questions = [str(item).strip() for item in unanswered[:3] if str(item).strip()]
+            if questions:
+                parts.append("Open issues from research: " + " | ".join(questions))
+        return " ".join(part for part in parts if part).strip()
+
     def _increment_run_counter(self, kb_path: Path, counter_name: str) -> None:
         kb = self._load_kb(kb_path)
         run_state = kb.setdefault("run_state", {})
@@ -493,7 +557,7 @@ class Orchestrator:
             run_state[counter_name] = int(run_state.get(counter_name, 0)) + 1
         except Exception:
             run_state[counter_name] = 1
-        write_json(kb_path, kb)
+        write_data_artifact(kb_path, kb, title="Run State")
 
     def _update_run_state(self, kb_path: Path, status: str, reason: str, iteration: int) -> None:
         kb = self._load_kb(kb_path)
@@ -502,7 +566,7 @@ class Orchestrator:
         run_state["reason"] = reason
         run_state["iterations_completed"] = max(int(run_state.get("iterations_completed", 0)), int(iteration))
         run_state["updated_at"] = time.time()
-        write_json(kb_path, kb)
+        write_data_artifact(kb_path, kb, title="Run State")
 
     def _append_pending_contract_amendments(
         self, kb_path: Path, iteration: int, proposer: str, amendments: list[dict[str, Any]]
@@ -529,7 +593,7 @@ class Orchestrator:
                     "timestamp": time.time(),
                 }
             )
-        write_json(kb_path, kb)
+        write_data_artifact(kb_path, kb, title="Run State")
 
     def _finalize_contract(self, kb_path: Path, iteration: int, finalized_by: str, reason: str) -> None:
         kb = self._load_kb(kb_path)
@@ -551,7 +615,7 @@ class Orchestrator:
             }
         )
         kb["pending_contract_amendments"] = []
-        write_json(kb_path, kb)
+        write_data_artifact(kb_path, kb, title="Run State")
 
     def _run_stage_parallel(self, tasks: list[Task], ctx: AgentContext) -> list[Task]:
         if not tasks:
@@ -628,8 +692,32 @@ class Orchestrator:
         return sys.stderr
 
     def _persist_run_log(self, run_dir: Path, tasks: list[Task]) -> None:
-        run_log = run_dir / "run_log.json"
-        write_json(run_log, [self._task_to_dict(t) for t in tasks])
+        run_log = run_dir / "run_log.md"
+        entries = [self._task_to_dict(t) for t in tasks]
+        write_text(run_log, self._render_run_log(entries))
+
+    def _render_run_log(self, entries: list[dict[str, Any]]) -> str:
+        lines = ["# Run Log", ""]
+        for index, item in enumerate(entries, start=1):
+            lines.extend(
+                [
+                    f"## Task {index}",
+                    f"- id: `{item.get('id', '')}`",
+                    f"- kind: `{item.get('kind', '')}`",
+                    f"- status: `{item.get('status', '')}`",
+                    f"- attempts: `{item.get('attempts', 0)}`",
+                ]
+            )
+            error = str(item.get("error", "")).strip()
+            if error:
+                lines.append(f"- error: {error}")
+            result = item.get("result", {})
+            if isinstance(result, dict) and result:
+                summary = str(result.get("summary", "")).strip() or str(result.get("reason", "")).strip()
+                if summary:
+                    lines.append(f"- result: {summary}")
+            lines.append("")
+        return "\n".join(lines).rstrip() + "\n"
 
     def _emit_task_trace(self, task: Task, ctx: AgentContext, agent_name: str, phase: str) -> None:
         if task.kind == "monitor_communications":

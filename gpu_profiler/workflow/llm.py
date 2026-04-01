@@ -26,14 +26,13 @@ OPENAI_RESPONSE_DEFAULT_THRESHOLD_SEC = 45.0
 OPENAI_RESPONSE_RESEARCH_THRESHOLD_SEC = 90.0
 OPENAI_RESPONSE_ANALYSIS_THRESHOLD_SEC = 75.0
 OPENAI_RESPONSE_CODEGEN_THRESHOLD_SEC = 120.0
+OPENAI_RESPONSE_BOOK_BUILDER_THRESHOLD_SEC = 180.0
 CODEGEN_SYSTEM_PROMPT = (
-    "You are a CUDA benchmark code-generation agent. Answer briefly and directly in plain Markdown. "
+    "You are an implementation-generation agent. Answer briefly and directly in plain Markdown. "
     "Do not output JSON. Produce exactly one concrete benchmark implementation memo. "
-    "The implementation must use CUDA C++ source (.cu) and a compile/run shell command. "
-    "Do not use Python benchmark scripts."
+    "Return one source file and one runnable shell command."
 )
-
-
+BOOK_BUILDER_SKILL_PATH = Path(__file__).resolve().parent.parent.parent / "skills" / "book-builder" / "SKILL.md"
 @dataclass
 class ResearchRequestPlanDecision:
     reason: str
@@ -93,6 +92,14 @@ class ResearchDecision:
     unanswered_questions: list[str]
     findings: list[dict[str, Any]]
     proposed_dimensions: list[str]
+    planner: str
+    raw_response: str = ""
+
+
+@dataclass
+class BookBuildDecision:
+    reason: str
+    book_markdown: str
     planner: str
     raw_response: str = ""
 
@@ -161,6 +168,18 @@ class LLMWorkflowBackend:
         iteration: int,
         max_iterations: int,
     ) -> AnalysisDecision:
+        raise NotImplementedError
+
+    def build_book(
+        self,
+        intent: str,
+        kb: dict[str, Any],
+        iteration: int,
+        book_markdown: str,
+        mode: str,
+        proposed_questions: list[dict[str, Any]] | None = None,
+        initial_question_seed: str = "",
+    ) -> BookBuildDecision:
         raise NotImplementedError
 
 
@@ -365,6 +384,364 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
             planner=self.name,
         )
 
+    def build_book(
+        self,
+        intent: str,
+        kb: dict[str, Any],
+        iteration: int,
+        book_markdown: str,
+        mode: str,
+        proposed_questions: list[dict[str, Any]] | None = None,
+        initial_question_seed: str = "",
+    ) -> BookBuildDecision:
+        _ = (kb, iteration, proposed_questions, initial_question_seed)
+        if mode in {"initialize", "initialize_structure"} or not _book_has_authored_sections(book_markdown):
+            return BookBuildDecision(
+                reason=f"Heuristic book builder authored the initial book from the provided intent during {mode}, following the local book-builder skill contract.",
+                book_markdown=_heuristic_initial_book_markdown(intent),
+                planner=self.name,
+                raw_response="",
+            )
+        if book_markdown.strip():
+            return BookBuildDecision(
+                reason=f"Heuristic book builder preserved the existing book during {mode}.",
+                book_markdown=book_markdown,
+                planner=self.name,
+                raw_response="",
+            )
+        return BookBuildDecision(
+            reason=f"Heuristic book builder initialized the book during {mode}.",
+            book_markdown="",
+            planner=self.name,
+            raw_response="",
+        )
+
+def _book_has_authored_sections(book_markdown: str) -> bool:
+    text = str(book_markdown or "")
+    return "## Chapter " in text and "### " in text
+
+
+def _load_book_builder_skill_text() -> str:
+    try:
+        return BOOK_BUILDER_SKILL_PATH.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def _book_builder_system_instructions() -> str:
+    skill_text = _load_book_builder_skill_text()
+    if skill_text:
+        return skill_text
+    return (
+        "You are the Book Builder. Return the canonical knowledge book as markdown only. "
+        "Use chapters, sections, and section-local questions. Keep the book causal, rigorous, and profiling-driven."
+    )
+
+
+def openai_completion_available() -> bool:
+    return bool(_normalized_api_key())
+
+
+def generate_book_builder_section_questions(
+    *,
+    intent: str,
+    chapter_heading: str,
+    section_heading: str,
+    section_markdown: str,
+    model: str = "gpt-5.4",
+    count: int = 10,
+) -> str:
+    if not openai_completion_available():
+        raise RuntimeError("OpenAI section-question generation unavailable: OPENAI_API_KEY is not set.")
+    backend = OpenAIWorkflowBackend(model=model)
+    return backend._text_completion(
+        system=_book_builder_system_instructions(),
+        user=_render_book_builder_section_questions_prompt(
+            intent=intent,
+            chapter_heading=chapter_heading,
+            section_heading=section_heading,
+            section_markdown=section_markdown,
+            count=count,
+        ),
+        max_output_tokens=2200,
+        timeout_sec=90.0,
+        context="book-builder-section-questions",
+    )
+
+def _heuristic_initial_book_markdown(intent: str) -> str:
+    normalized_intent = " ".join(str(intent or "").split())
+    intro = (
+        normalized_intent
+        or "Build a causally grounded, profiling-driven book of GPU microarchitecture performance behavior."
+    )
+    return "\n".join(
+        [
+            f"<!-- intent: {normalized_intent} -->",
+            "",
+            "# GPU Architecture Knowledge Book",
+            "",
+            "## Chapter 1. Measurement Strategy",
+            "",
+            "### 1.1 Profiling Discipline and Experimental Controls",
+            "",
+            "Summary",
+            "The book should begin by establishing how microarchitecture-level claims will be measured, validated, and compared on the local GPU.",
+            "",
+            "Mechanism",
+            "Microarchitecture conclusions are only meaningful when benchmark structure, launch conditions, profiler configuration, and confounders are controlled well enough to separate execution effects from measurement artifacts.",
+            "",
+            "Evidence",
+            f"- Initial intent: {intro}",
+            "- Local GPU-specific evidence has not been gathered yet.",
+            "",
+            "Current Understanding",
+            "A profiling-driven methodology is required before deeper causal claims about execution pipelines, memory behavior, or occupancy can be trusted.",
+            "",
+            "Uncertainty",
+            "The minimum measurement protocol needed to obtain stable, discriminative microarchitecture evidence on this GPU is still unknown.",
+            "",
+            "Questions",
+            "- Question: Which local profiling measurements are necessary to distinguish execution-pipeline limits from memory-system limits on this GPU?",
+            "  Why It Matters: This determines whether later sections can make causal claims instead of reporting ambiguous observations.",
+            "  Context: The initial intent prioritizes experimentally answerable microarchitecture questions grounded in local profiling and CUDA microbenchmarks.",
+            "  Answer: Not answered yet.",
+            "  Evidence: No supporting evidence recorded yet.",
+            "  Resolved: No",
+            "- Question: Which benchmark controls and reporting conventions are necessary so later microarchitecture measurements are reproducible and comparable?",
+            "  Why It Matters: A reusable measurement protocol is required before the book can accumulate rigorous evidence across iterations.",
+            "  Context: The initial book should begin with profiling discipline rather than jumping directly to high-level performance conclusions.",
+            "  Answer: Not answered yet.",
+            "  Evidence: No supporting evidence recorded yet.",
+            "  Resolved: No",
+            "",
+            "## Chapter 2. Execution Pipelines and Warp Scheduling",
+            "",
+            "### 2.1 Instruction Issue and Pipeline Throughput",
+            "",
+            "Summary",
+            "A predictive performance model needs quantitative knowledge of how instruction mix and pipeline availability constrain throughput.",
+            "",
+            "Mechanism",
+            "Kernel throughput depends on which instruction classes are issued, how frequently the relevant pipelines accept work, and whether dependencies or structural hazards reduce sustained issue rate.",
+            "",
+            "Evidence",
+            "- No local instruction-throughput benchmark has been accepted yet.",
+            "",
+            "Current Understanding",
+            "Instruction throughput is expected to be a first-order microarchitecture constraint, but the dominant execution pipelines on this GPU have not been isolated experimentally.",
+            "",
+            "Uncertainty",
+            "The sustained issue behavior of simple arithmetic, integer, and mixed-instruction kernels is unresolved.",
+            "",
+            "Questions",
+            "- Question: Which instruction classes saturate distinct execution pipelines on the local GPU, and what sustained throughput does each class achieve?",
+            "  Why It Matters: This anchors pipeline-level reasoning for later kernel analysis and prevents the book from treating compute throughput as a single undifferentiated ceiling.",
+            "  Context: The initial scope emphasizes execution pipelines, issue behavior, and quantitatively testable microarchitecture questions.",
+            "  Answer: Not answered yet.",
+            "  Evidence: No supporting evidence recorded yet.",
+            "  Resolved: No",
+            "- Question: Which dependency patterns or structural hazards reduce sustained instruction issue rate even when a single pipeline should be active?",
+            "  Why It Matters: This distinguishes ideal pipeline capacity from the practical throughput kernels can sustain under realistic dependency structure.",
+            "  Context: Pipeline throughput should be explained causally, including factors that prevent kernels from reaching nominal issue limits.",
+            "  Answer: Not answered yet.",
+            "  Evidence: No supporting evidence recorded yet.",
+            "  Resolved: No",
+            "",
+            "### 2.2 Warp Scheduling and Latency Hiding",
+            "",
+            "Summary",
+            "Warp scheduling behavior determines whether the machine can hide latency well enough to approach pipeline or memory ceilings.",
+            "",
+            "Mechanism",
+            "If enough eligible warps exist, the scheduler can cover execution and memory latency by switching among ready warps; if not, stalls propagate into throughput loss.",
+            "",
+            "Evidence",
+            "- No local scheduler-sensitivity benchmark has been accepted yet.",
+            "",
+            "Current Understanding",
+            "Latency hiding is believed to be a dominant mediator between raw hardware capability and achieved kernel throughput, but the local scheduler response has not been measured.",
+            "",
+            "Uncertainty",
+            "The number of eligible warps needed to hide common execution and memory latencies on this GPU is unknown.",
+            "",
+            "Questions",
+            "- Question: How many eligible warps are required to hide representative execution and memory latencies on the local GPU?",
+            "  Why It Matters: This links occupancy, dependency structure, and achieved throughput into one causal story instead of treating them as separate observations.",
+            "  Context: The initial intent explicitly prioritizes warp scheduling, latency hiding, and experimentally grounded causal structure.",
+            "  Answer: Not answered yet.",
+            "  Evidence: No supporting evidence recorded yet.",
+            "  Resolved: No",
+            "- Question: Which profiler-visible signals best separate scheduler starvation from true execution-pipeline saturation on this GPU?",
+            "  Why It Matters: Without discriminative scheduler evidence, later performance explanations may confuse latency exposure with compute saturation.",
+            "  Context: The scheduler chapter should contain both quantitative throughput questions and measurement-methodology questions.",
+            "  Answer: Not answered yet.",
+            "  Evidence: No supporting evidence recorded yet.",
+            "  Resolved: No",
+            "",
+            "## Chapter 3. Memory Hierarchy and Data Movement",
+            "",
+            "### 3.1 Global Memory Throughput and Latency",
+            "",
+            "Summary",
+            "The first memory chapter should establish the local GPU's reproducible global-memory ceilings and latency behavior under controlled access patterns.",
+            "",
+            "Mechanism",
+            "Achieved bandwidth and latency depend on access pattern, outstanding request depth, coalescing quality, and the machine's ability to overlap memory transactions with other work.",
+            "",
+            "Evidence",
+            "- No accepted local global-memory microbenchmark has been recorded yet.",
+            "",
+            "Current Understanding",
+            "Global memory is expected to be one of the dominant bottlenecks for many kernels, but the local quantitative regime has not been measured.",
+            "",
+            "Uncertainty",
+            "The sustained bandwidth ceiling, latency scale, and benchmark conditions needed for reproducible measurement are open.",
+            "",
+            "Questions",
+            "- Question: What sustained global-memory bandwidth and effective latency can the local GPU deliver under simple, well-controlled access patterns?",
+            "  Why It Matters: This establishes the first trustworthy memory-side ceiling needed for later causal performance modeling.",
+            "  Context: The initial intent prioritizes profiling-driven measurement of hardware mechanisms that directly determine CUDA kernel performance.",
+            "  Answer: Not answered yet.",
+            "  Evidence: No supporting evidence recorded yet.",
+            "  Resolved: No",
+            "- Question: Which access-pattern controls are necessary to distinguish a latency-dominated memory regime from a bandwidth-dominated memory regime on this GPU?",
+            "  Why It Matters: This prevents the section from reporting one memory number without understanding which mechanism actually limits performance.",
+            "  Context: Memory characterization should include regime boundaries and not only a single peak-bandwidth measurement.",
+            "  Answer: Not answered yet.",
+            "  Evidence: No supporting evidence recorded yet.",
+            "  Resolved: No",
+            "",
+            "### 3.2 Cache, Shared Memory, and Locality Effects",
+            "",
+            "Summary",
+            "Locality-sensitive structures such as caches and shared memory change how data movement costs appear at kernel level.",
+            "",
+            "Mechanism",
+            "Access reuse, working-set size, bank behavior, and staging strategy determine whether requests are served by faster local structures or fall through to more expensive memory paths.",
+            "",
+            "Evidence",
+            "- No local cache or shared-memory locality study has been accepted yet.",
+            "",
+            "Current Understanding",
+            "Cache and shared-memory behavior are known to mediate performance strongly, but the local transition points and causal signatures remain unresolved.",
+            "",
+            "Uncertainty",
+            "The measurable boundaries between cache-friendly, shared-memory-friendly, and DRAM-dominated regimes are not yet known.",
+            "",
+            "Questions",
+            "- Question: Which locality patterns reveal the transition between cache-dominated, shared-memory-dominated, and DRAM-dominated behavior on the local GPU?",
+            "  Why It Matters: This is necessary for the book to explain why similar kernels can land in very different memory-performance regimes.",
+            "  Context: The initial scope includes memory hierarchy behavior, cache effects, and shared-memory behavior as first-class microarchitecture mechanisms.",
+            "  Answer: Not answered yet.",
+            "  Evidence: No supporting evidence recorded yet.",
+            "  Resolved: No",
+            "- Question: Which profiler counters or timing signatures most reliably indicate that locality gains come from caches rather than shared-memory staging?",
+            "  Why It Matters: The book needs discriminative evidence for competing locality explanations, not just improved runtime observations.",
+            "  Context: Locality mechanisms often interact, so measurement design must help separate them.",
+            "  Answer: Not answered yet.",
+            "  Evidence: No supporting evidence recorded yet.",
+            "  Resolved: No",
+            "",
+            "## Chapter 4. Resource Constraints and Synchronization",
+            "",
+            "### 4.1 Occupancy, Registers, and Residency Limits",
+            "",
+            "Summary",
+            "Resource ceilings determine how much parallel state the machine can sustain and therefore how effectively it can hide latency.",
+            "",
+            "Mechanism",
+            "Register usage, shared-memory allocation, and block shape constrain residency; residency in turn shapes scheduler flexibility, latency hiding, and achieved throughput.",
+            "",
+            "Evidence",
+            "- No accepted local occupancy-limit benchmark has been recorded yet.",
+            "",
+            "Current Understanding",
+            "Occupancy is expected to matter through its interaction with scheduling and memory hiding, but the dominant resource constraints on this GPU are still unknown.",
+            "",
+            "Uncertainty",
+            "The thresholds at which registers or shared memory become the primary limiter are unresolved.",
+            "",
+            "Questions",
+            "- Question: Under what conditions do registers, shared memory, or block residency become the dominant occupancy limiter on the local GPU?",
+            "  Why It Matters: This connects static kernel resource use to achieved performance through a measurable causal chain.",
+            "  Context: The initial intent prioritizes occupancy limits and other microarchitecture mechanisms that directly affect kernel behavior.",
+            "  Answer: Not answered yet.",
+            "  Evidence: No supporting evidence recorded yet.",
+            "  Resolved: No",
+            "- Question: How does achieved throughput change when occupancy drops for different underlying reasons such as register pressure versus shared-memory allocation?",
+            "  Why It Matters: This separates occupancy as a raw count from the causal mechanism by which different resource limits affect performance.",
+            "  Context: Occupancy should be treated as a mediated performance effect, not as an isolated scalar target.",
+            "  Answer: Not answered yet.",
+            "  Evidence: No supporting evidence recorded yet.",
+            "  Resolved: No",
+            "",
+            "### 4.2 Synchronization and Communication Costs",
+            "",
+            "Summary",
+            "Synchronization and communication overheads can become first-order costs even in kernels with modest arithmetic or memory demand.",
+            "",
+            "Mechanism",
+            "Barriers, atomics, and cross-thread communication serialize parts of execution, introduce waiting, and can amplify contention or bank conflicts.",
+            "",
+            "Evidence",
+            "- No accepted local synchronization-cost benchmark has been recorded yet.",
+            "",
+            "Current Understanding",
+            "Synchronization costs are known qualitatively, but the local penalty structure across barriers and atomics has not been measured.",
+            "",
+            "Uncertainty",
+            "The scale and causal sources of synchronization overhead on this GPU remain open.",
+            "",
+            "Questions",
+            "- Question: What are the measurable costs of barriers, atomics, and contention-driven communication patterns on the local GPU?",
+            "  Why It Matters: This is needed for the book to explain when coordination overhead, rather than pure compute or memory access, dominates performance.",
+            "  Context: The initial scope explicitly includes synchronization costs and communication effects as profiling-driven microarchitecture topics.",
+            "  Answer: Not answered yet.",
+            "  Evidence: No supporting evidence recorded yet.",
+            "  Resolved: No",
+            "- Question: Which synchronization costs arise from serialization itself versus secondary effects such as memory contention or bank conflicts?",
+            "  Why It Matters: The section should explain synchronization overhead causally rather than treating every slowdown under barriers or atomics as the same phenomenon.",
+            "  Context: This chapter should contain discriminative questions that separate competing explanations for coordination overhead.",
+            "  Answer: Not answered yet.",
+            "  Evidence: No supporting evidence recorded yet.",
+            "  Resolved: No",
+            "",
+            "## Chapter 5. Predictive Modeling Frontier",
+            "",
+            "### 5.1 From Primitive Mechanisms to Kernel-Level Prediction",
+            "",
+            "Summary",
+            "The long-term goal is a predictive model, but the initial book should only model behavior that has been grounded in measured microarchitecture primitives.",
+            "",
+            "Mechanism",
+            "Kernel-level prediction becomes defensible only after lower-level execution, memory, occupancy, and synchronization mechanisms have been separated and quantified well enough to compose them into higher-level explanations.",
+            "",
+            "Evidence",
+            "- The initial intent requires a causally grounded and experimentally validated path toward predictive modeling.",
+            "",
+            "Current Understanding",
+            "The modeling goal is clear, but the primitive ceilings and regime boundaries needed for prediction remain largely unmeasured.",
+            "",
+            "Uncertainty",
+            "It is not yet known which primitive mechanisms should be measured first to support a usable predictive model.",
+            "",
+            "Questions",
+            "- Question: Which foundational microarchitecture measurements should be established first so later sections can support kernel-level prediction rather than descriptive profiling?",
+            "  Why It Matters: This defines the epistemic curriculum for the whole book and keeps the system focused on foundational, profiling-driven questions.",
+            "  Context: The initial intent asks for a textbook that evolves toward a predictive performance model while remaining grounded in validated lower-level mechanisms.",
+            "  Answer: Not answered yet.",
+            "  Evidence: No supporting evidence recorded yet.",
+            "  Resolved: No",
+            "- Question: Which unresolved lower-level sections currently block defensible kernel-level prediction the most strongly?",
+            "  Why It Matters: This keeps the predictive-modeling chapter tied to the actual dependency structure of the book instead of becoming an abstract wish list.",
+            "  Context: The predictive frontier should track which primitive mechanisms still prevent principled composition into a kernel-level model.",
+            "  Answer: Not answered yet.",
+            "  Evidence: No supporting evidence recorded yet.",
+            "  Resolved: No",
+            "",
+        ]
+    )
+
 
 class OpenAIWorkflowBackend(LLMWorkflowBackend):
     def __init__(self, model: str = "gpt-5.4", request_timeout_sec: float = PLANNER_REQUEST_TIMEOUT_SEC) -> None:
@@ -391,8 +768,8 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             "research_request_memo": _trim_text(research_request_memo, 3000),
             "max_sources": max_sources,
             "task": (
-                "Search online only within the scope requested by the planner-authored research request. "
-                "Prioritize vendor docs, profiler docs, papers, and reproducible benchmark methodologies."
+                "Search only within the scope requested by the planner-authored research request. "
+                "Prioritize authoritative primary references and reproducible methodologies."
             ),
             "output_schema": {
                 "reason": "str",
@@ -511,8 +888,8 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         )
         out = self._json_completion(
             system=(
-                "You are a planner agent deciding only whether external research is needed next. "
-                "Return strict JSON only. Do not generate benchmark plans, executable code, commands, or profiler invocations."
+                "You are a planning agent deciding only whether external research is needed next. "
+                "Return strict JSON only. Do not generate execution plans, source code, or commands."
             ),
             user=payload,
             context="plan-research-request",
@@ -569,8 +946,8 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         user_prompt = _render_planner_benchmark_prompt(payload)
         memo = self._text_completion(
             system=(
-                "You are a GPU performance-model planner. Answer briefly and directly in plain Markdown. "
-                "Do not output JSON. Do not output executable code, commands, or profiler invocations."
+                "You are a planning agent. Answer briefly and directly in plain Markdown. "
+                "Do not output JSON. Do not output executable code or commands."
             ),
             user=user_prompt,
             context="planner-benchmark",
@@ -761,7 +1138,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         }
         out = self._json_completion(
             system=(
-                "You are an analysis agent that updates a knowledge base from benchmark evidence. "
+                "You are an analysis agent that updates a knowledge base from execution evidence. "
                 "Return strict JSON only. Only claim coverage for successful non-skipped runs."
             ),
             user=payload,
@@ -785,6 +1162,47 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             required_observability=[str(x) for x in out.get("required_observability", []) if str(x).strip()],
             contract_amendments=_sanitize_amendments(out.get("contract_amendments", [])),
             planner=self.name,
+        )
+
+    def build_book(
+        self,
+        intent: str,
+        kb: dict[str, Any],
+        iteration: int,
+        book_markdown: str,
+        mode: str,
+        proposed_questions: list[dict[str, Any]] | None = None,
+        initial_question_seed: str = "",
+    ) -> BookBuildDecision:
+        payload = {
+            "intent": intent,
+            "iteration": iteration,
+            "mode": mode,
+            "initial_question_seed": _trim_text(initial_question_seed, 12000),
+            "knowledge_base_excerpt": _trim_text(book_markdown, 12000),
+            "history": [
+                {
+                    "iteration": item.get("iteration"),
+                    "summary": _trim_text(item.get("summary", ""), 240),
+                    "claims_added": item.get("claims_added"),
+                }
+                for item in (kb.get("history", []) if isinstance(kb.get("history", []), list) else [])[-4:]
+                if isinstance(item, dict)
+            ],
+            "proposed_questions": proposed_questions or [],
+        }
+        memo = self._text_completion(
+            system=_book_builder_system_instructions(),
+            user=_render_book_builder_prompt(payload),
+            max_output_tokens=5200,
+            timeout_sec=120.0,
+            context="book-builder",
+        )
+        return BookBuildDecision(
+            reason=f"OpenAI book builder completed {mode}.",
+            book_markdown=memo.strip(),
+            planner=self.name,
+            raw_response=memo,
         )
 
     def _json_completion(
@@ -1069,6 +1487,41 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
             alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
             return alt
 
+    def build_book(
+        self,
+        intent: str,
+        kb: dict[str, Any],
+        iteration: int,
+        book_markdown: str,
+        mode: str,
+        proposed_questions: list[dict[str, Any]] | None = None,
+        initial_question_seed: str = "",
+    ) -> BookBuildDecision:
+        try:
+            return self._call_primary(
+                "build_book",
+                intent,
+                kb,
+                iteration,
+                book_markdown,
+                mode,
+                proposed_questions,
+                initial_question_seed,
+            )
+        except Exception as exc:  # noqa: BLE001
+            alt = self.fallback.build_book(
+                intent,
+                kb,
+                iteration,
+                book_markdown,
+                mode,
+                proposed_questions,
+                initial_question_seed,
+            )
+            alt.reason = f"Primary book building failed ({exc}); fallback used. {alt.reason}"
+            alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
+            return alt
+
     def _call_primary(self, method_name: str, *args: Any) -> Any:
         timeout_sec = self._primary_timeout_sec(method_name)
         if timeout_sec <= 0:
@@ -1194,6 +1647,9 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
         if method_name == "analyze_results":
             attempt_timeout = max(ANALYSIS_TIMEOUT_SEC + 5.0, timeout_sec + 5.0)
             return _robust_response_threshold("analysis-json", attempt_timeout) + 5.0
+        if method_name == "build_book":
+            attempt_timeout = max(ANALYSIS_TIMEOUT_SEC + 25.0, timeout_sec + 25.0)
+            return _robust_response_threshold("book-builder", attempt_timeout) + 10.0
         attempt_timeout = max(5.0, timeout_sec + 5.0)
         return _robust_response_threshold(_method_timeout_context(method_name), attempt_timeout) + 5.0
 
@@ -1232,7 +1688,10 @@ def _launch_openai_timeout_diagnostic(
         "payload": payload,
         "launched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    (run_dir / "event.json").write_text(json.dumps(event, indent=2), encoding="utf-8")
+    (run_dir / "event.md").write_text(
+        "# Timeout Diagnostic Event\n\n```json\n" + json.dumps(event, indent=2) + "\n```\n",
+        encoding="utf-8",
+    )
 
     ping_script = repo_root / "scripts" / "openai_ping.py"
     if ping_script.exists():
@@ -1762,10 +2221,10 @@ def _render_planner_benchmark_prompt(payload: dict[str, Any]) -> str:
         f"Ranked frontier candidates:\n{frontier_candidates}\n\n"
         f"Selected question:\n{question_memo}\n\n"
         f"Research memo:\n{research_memo}\n\n"
-        "Task: Propose the single best next benchmark-plan memo that directly answers the selected question.\n"
+        "Task: Propose the single best next plan memo that directly answers the selected question.\n"
         "Requirements:\n"
         "- non-executable\n"
-        "- one benchmark only\n"
+        "- one plan item only\n"
         "- domain-specific\n"
         "- precise\n"
         "- concise\n"
@@ -1773,9 +2232,94 @@ def _render_planner_benchmark_prompt(payload: dict[str, Any]) -> str:
         "Output sections exactly:\n"
         "1. Target Dimension\n"
         "2. Why This First\n"
-        "3. Benchmark Idea\n"
+        "3. Plan Idea\n"
         "4. Required Evidence\n"
         "5. What Success Unlocks\n"
+    )
+
+
+def _render_book_builder_prompt(payload: dict[str, Any]) -> str:
+    history = "\n".join(
+        f"- iter {item.get('iteration')}: {item.get('summary')} (claims_added={item.get('claims_added')})"
+        for item in payload.get("history", [])
+        if isinstance(item, dict)
+    ) or "- none recorded"
+    proposed = "\n".join(
+        f"- question: {item.get('question', '')} | why: {item.get('why_it_matters', '')}"
+        for item in payload.get("proposed_questions", [])
+        if isinstance(item, dict)
+    ) or "- none proposed"
+    if str(payload.get("mode", "")).strip() == "initialize_structure":
+        return (
+            f"Intent: {payload.get('intent', '')}\n"
+            f"Iteration: {payload.get('iteration', 0)}\n"
+            "Mode: initialize_structure\n\n"
+            "Book-builder skill guidance:\n"
+            f"{_trim_text(_load_book_builder_skill_text(), 6000) or 'No local skill text available.'}\n\n"
+            "Current canonical knowledge book:\n"
+            f"{payload.get('knowledge_base_excerpt', '').strip() or 'No existing book recorded.'}\n\n"
+            "Task: Return the full initial canonical knowledge book as markdown only.\n"
+            "Requirements:\n"
+            "- one single book\n"
+            "- keep chapters and sections\n"
+            "- author substantive section prose for Summary, Mechanism, Evidence, Current Understanding, and Uncertainty\n"
+            "- do not leave placeholder text such as 'No summary recorded yet'\n"
+            "- do not rely on a question-seed memo\n"
+            "- Questions sections may remain empty at this stage because question generation happens in a later pass\n"
+            "- explanations must be causal and evidence-aware\n"
+            "- do not return JSON\n"
+        )
+    return (
+        f"Intent: {payload.get('intent', '')}\n"
+        f"Iteration: {payload.get('iteration', 0)}\n"
+        f"Mode: {payload.get('mode', '')}\n\n"
+        "Book-builder skill guidance:\n"
+        f"{_trim_text(_load_book_builder_skill_text(), 6000) or 'No local skill text available.'}\n\n"
+        "Recent history:\n"
+        f"{history}\n\n"
+        "Proposed follow-up questions:\n"
+        f"{proposed}\n\n"
+        "Current canonical knowledge book:\n"
+        f"{payload.get('knowledge_base_excerpt', '').strip() or 'No existing book recorded.'}\n\n"
+        "Task: Return the full updated canonical knowledge book as markdown only.\n"
+        "Requirements:\n"
+        "- one single book\n"
+        "- keep chapters and sections\n"
+        "- each section should contain Summary, Mechanism, Evidence, Current Understanding, Uncertainty, and Questions\n"
+        "- do not leave placeholder text such as 'No summary recorded yet' or 'No unresolved question recorded at this time'\n"
+        "- preserve unanswered questions at the end of sections\n"
+        "- resolved questions should be absorbed into the section body and removed\n"
+        "- explanations must be causal and evidence-aware\n"
+        "- do not return JSON\n"
+    )
+
+
+def _render_book_builder_section_questions_prompt(
+    *,
+    intent: str,
+    chapter_heading: str,
+    section_heading: str,
+    section_markdown: str,
+    count: int,
+) -> str:
+    return (
+        f"Intent: {intent}\n"
+        f"Chapter: {chapter_heading}\n"
+        f"Section: {section_heading}\n"
+        f"Target question count: about {max(1, int(count))}\n\n"
+        "Current section:\n"
+        f"{section_markdown.strip()}\n\n"
+        "Task: Generate section-local frontier questions for this section only.\n"
+        "Requirements:\n"
+        "- base the questions on the actual section content\n"
+        "- produce about the requested number of strong questions\n"
+        "- each question must fit this section's mechanism and uncertainty\n"
+        "- return markdown only\n"
+        "- do not return JSON\n"
+        "- use repeated question blocks in exactly this shape:\n"
+        "- Question: ...\n"
+        "  Why It Matters: ...\n"
+        "  Context: ...\n"
     )
 
 
@@ -1802,37 +2346,36 @@ def _render_codegen_prompt(payload: dict[str, Any]) -> str:
         f"Iteration: {payload.get('iteration', 0)}\n"
         f"Target dimension: {payload.get('dimension', '')}\n"
         f"Available tools: {tools}\n\n"
-        "Current frontier question:\n"
+        "Current selected question:\n"
         f"{current_question}\n\n"
         "Relevant knowledge:\n"
         f"{node_summary}\n\n"
         "Planning context:\n"
         f"{str(payload.get('planning_memo', '')).strip() or 'No additional planning context provided.'}\n\n"
-        "Relevant internal benchmark-plan item:\n"
+        "Relevant internal plan item:\n"
         f"- title: {str(item.get('title', '')).strip()}\n"
         f"- objective: {str(item.get('objective', '')).strip()}\n"
         f"- benchmark role: {str(item.get('benchmark_role', '')).strip()}\n"
         f"- required evidence: {', '.join(str(x) for x in item.get('required_evidence', []) if str(x).strip()) or 'none specified'}\n"
         f"- rationale: {str(item.get('rationale', '')).strip()}\n\n"
-        "Task: Write a concise implementation memo for exactly one CUDA benchmark.\n"
+        "Task: Write a concise implementation memo for exactly one implementation.\n"
         "Requirements:\n"
         "- domain-specific\n"
         "- precise\n"
         "- concise\n"
-        "- one CUDA source file only\n"
+        "- one source file only\n"
         "- one shell command only\n"
         "- bounded runtime when possible\n"
-        "- no Python benchmark scripts\n"
         "Output sections exactly:\n"
         "1. Implementation Summary\n"
-        "2. CUDA Source File\n"
+        "2. Source File\n"
         "3. Build and Run Command\n"
         "4. Validation Checks\n"
         "5. Feasibility and Risks\n"
         "\n"
         "In section 2, include:\n"
-        "Path: <relative path ending in .cu>\n"
-        "then one fenced ```cuda code block.\n"
+        "Path: <relative source path>\n"
+        "then one fenced code block.\n"
         "In section 3, include one fenced ```bash code block with the command.\n"
         "In section 5, include lines starting with:\n"
         "- Feasibility: feasible|feasible_with_revision|not_feasible\n"
@@ -2209,7 +2752,7 @@ def _codegen_reason_from_memo(memo: str) -> str:
 def _benchmark_plan_from_memo(memo: str, intent: str, focus_nodes: list[str], iteration: int) -> dict[str, Any]:
     target_dimension = _first_nonempty_line(_extract_numbered_section(memo, "Target Dimension"))
     why_first = _extract_numbered_section(memo, "Why This First")
-    benchmark_idea = _extract_numbered_section(memo, "Benchmark Idea")
+    benchmark_idea = _extract_numbered_section(memo, "Plan Idea") or _extract_numbered_section(memo, "Benchmark Idea")
     required_evidence = _extract_bullets_or_lines(_extract_numbered_section(memo, "Required Evidence"))
     success_unlocks = _extract_bullets_or_lines(_extract_numbered_section(memo, "What Success Unlocks"))
     if not target_dimension:
@@ -2255,7 +2798,7 @@ def _benchmark_from_memo(
     )
     item = benchmark_items[0] if benchmark_items else {}
     summary = _extract_numbered_section(memo, "Implementation Summary")
-    source_section = _extract_numbered_section(memo, "CUDA Source File")
+    source_section = _extract_numbered_section(memo, "Source File") or _extract_numbered_section(memo, "CUDA Source File")
     command_section = _extract_numbered_section(memo, "Build and Run Command")
     validation_section = _extract_numbered_section(memo, "Validation Checks")
     feasibility_section = _extract_numbered_section(memo, "Feasibility and Risks")
@@ -2291,8 +2834,8 @@ def _benchmark_from_memo(
         amendment_list.append(
             {
                 "path": "implementation.cuda_source",
-                "change": "Return one complete fenced CUDA code block in section 2 and ensure the file is not truncated.",
-                "rationale": "The codegen response did not include a complete CUDA source block." if truncated_source else "The codegen response did not include a CUDA source block.",
+                "change": "Return one complete fenced source code block in section 2 and ensure the file is not truncated.",
+                "rationale": "The implementation response did not include a complete source block." if truncated_source else "The implementation response did not include a source block.",
                 "priority": "high",
             }
         )
@@ -2360,7 +2903,7 @@ def _render_codegen_repair_prompt(
         elif change:
             fixes.append(f"- {change}")
     if not fixes:
-        fixes.append("- Return one complete five-section implementation memo with a fenced CUDA source block and a runnable nvcc command.")
+        fixes.append("- Return one complete five-section implementation memo with a fenced source code block and a runnable shell command.")
     return "\n".join(
         [
             "Your previous implementation memo could not be converted into a runnable benchmark.",
@@ -2569,7 +3112,7 @@ def _sanitize_benchmarks(
 
 
 def _sanitize_files(raw_files: list[dict[str, Any]]) -> list[dict[str, str]]:
-    allowed_suffix = (".cu", ".md", ".json")
+    allowed_suffix = (".cu", ".md", ".txt")
     out: list[dict[str, str]] = []
     if not isinstance(raw_files, list):
         return out
@@ -2585,7 +3128,7 @@ def _sanitize_files(raw_files: list[dict[str, Any]]) -> list[dict[str, str]]:
             continue
         if not path.endswith(allowed_suffix):
             continue
-        if file_type and file_type not in {"cu", "md", "json"}:
+        if file_type and file_type not in {"cu", "md", "txt"}:
             continue
         out.append({"path": path, "type": file_type or path.rsplit(".", 1)[-1], "content": content})
     return out

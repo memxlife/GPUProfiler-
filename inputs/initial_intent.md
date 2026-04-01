@@ -1,0 +1,7 @@
+# Initial Intent
+
+The objective of this system is to build and continuously refine a causally grounded textbook of GPU microarchitecture-level performance behavior for the local GPU, using profiling-driven experiments and targeted CUDA microbenchmarks. The initial scope should stay close to hardware mechanisms that directly determine kernel performance, including execution pipelines, warp scheduling, issue behavior, latency hiding, instruction throughput, memory hierarchy behavior, cache effects, shared-memory behavior, occupancy limits, and synchronization costs.
+
+The initial book should be organized around experimentally answerable microarchitecture questions rather than broad high-level theory. Each section should focus on one performance mechanism, define the measurable variables, describe the expected causal relationships, state the current uncertainty, and end with concrete open questions that can be answered through local profiling or benchmarking. The initial questions should prioritize foundational mechanisms whose answers enable later reasoning about more complex kernel behavior.
+
+The book must serve as a rigorous and mechanistic understanding of how observed performance emerges from the interaction between program structure and GPU hardware. It should accumulate only causally meaningful, quantitatively testable knowledge, and it should evolve toward a predictive performance model that can later support principled CUDA kernel analysis and optimization.

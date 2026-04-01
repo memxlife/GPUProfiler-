@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -10,6 +11,10 @@ from ..workflow.llm import (
     CODEGEN_SYSTEM_PROMPT,
     HeuristicWorkflowBackend,
     LLMWorkflowBackend,
+    OpenAIWorkflowBackend,
+    ResilientWorkflowBackend,
+    generate_book_builder_section_questions,
+    openai_completion_available,
     _compact_codegen_kb,
     _compact_codegen_plan,
     _enforce_payload_budget,
@@ -21,9 +26,15 @@ from ..workflow.llm import (
     CODEGEN_INPUT_HARD_CAP_CHARS,
     CODEGEN_INPUT_TARGET_CHARS,
 )
-from ..knowledge.knowledge_base import load_markdown_knowledge_base_memos, update_markdown_knowledge_base
+from ..knowledge.knowledge_base import (
+    answer_question,
+    consolidate_markdown_knowledge_base,
+    list_book_sections,
+    load_markdown_knowledge_base_memos,
+    set_section_questions,
+)
 from ..core.models import AgentContext, Task
-from ..core.store import read_json, write_json, write_text
+from ..core.store import read_data_artifact, write_data_artifact, write_text
 
 PASSWORDLESS_SUDO_NCU_CANDIDATES = (
     "/usr/local/cuda/bin/ncu",
@@ -218,14 +229,12 @@ class LLMResearchAgent(Agent):
         }
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
         iter_dir.mkdir(parents=True, exist_ok=True)
-        json_path = iter_dir / "research.json"
         md_path = iter_dir / "research.md"
         raw_path = iter_dir / "research_raw.md"
-        write_json(json_path, result)
         write_text(md_path, _render_research_md(result))
         if decision.raw_response:
             write_text(raw_path, decision.raw_response)
-        result["artifact"] = str(json_path)
+        result["artifact"] = str(md_path)
         result["artifact_md"] = str(md_path)
         result["raw_artifact"] = str(raw_path) if decision.raw_response else None
         return result
@@ -327,20 +336,18 @@ class LLMCodegenAgent(Agent):
             },
         }
         implementation["generated_files"] = generated_files
-        json_path = iter_dir / "implementation.json"
         md_path = iter_dir / "implementation.md"
-        feasibility_path = iter_dir / "feasibility_report.json"
-        preflight_path = iter_dir / "implementation_preflight.json"
+        feasibility_path = iter_dir / "feasibility_report.md"
+        preflight_path = iter_dir / "implementation_preflight.md"
         raw_path = iter_dir / "implementation_raw.md"
         prompt_path = iter_dir / "implementation_prompt.md"
-        write_json(json_path, implementation)
-        write_json(feasibility_path, feasibility_report)
-        write_json(preflight_path, preflight_results)
         write_text(md_path, _render_implementation_md(implementation))
+        write_data_artifact(feasibility_path, feasibility_report, title=f"Iteration {iteration} Feasibility Report")
+        write_data_artifact(preflight_path, preflight_results, title=f"Iteration {iteration} Implementation Preflight")
         write_text(prompt_path, "\n\n---\n\n".join(prompt_sections))
         if decision and decision.raw_response:
             write_text(raw_path, decision.raw_response)
-        implementation["artifact"] = str(json_path)
+        implementation["artifact"] = str(md_path)
         implementation["artifact_md"] = str(md_path)
         implementation["feasibility_artifact"] = str(feasibility_path)
         implementation["preflight_artifact"] = str(preflight_path)
@@ -359,10 +366,10 @@ class MetricsCollectorAgent(Agent):
         samples = int(task.payload.get("samples", 3))
         interval_sec = float(task.payload.get("interval_sec", 0.5))
         phase = task.payload.get("phase", "unknown")
-        out_name = task.payload.get("out_name", f"metrics_{phase}.json")
+        out_name = task.payload.get("out_name", f"metrics_{phase}.md")
         records = self.collect(samples=samples, interval_sec=interval_sec)
         out = ctx.run_dir / out_name
-        write_json(out, records)
+        write_data_artifact(out, records, title=f"Metrics {phase}")
         return {"phase": phase, "samples": samples, "artifact": str(out), "records": records}
 
     def collect(self, samples: int, interval_sec: float) -> list[dict[str, Any]]:
@@ -423,8 +430,8 @@ class SystemInfoAgent(Agent):
             "python_version": subprocess.run(["python", "--version"], capture_output=True, text=True).stdout.strip()
             or subprocess.run(["python", "--version"], capture_output=True, text=True).stderr.strip(),
         }
-        out = ctx.run_dir / "system_info.json"
-        write_json(out, info)
+        out = ctx.run_dir / "system_info.md"
+        write_data_artifact(out, info, title="System Information")
         return {"artifact": str(out), "info": info}
 
 
@@ -467,11 +474,11 @@ class WorkloadRunnerAgent(Agent):
             "retried_with_sudo_ncu": retried_with_sudo_ncu,
             "sudo_ncu_path": sudo_ncu_path,
         }
-        artifact = ctx.run_dir / "workload_result.json"
+        artifact = ctx.run_dir / "workload_result.md"
         artifact_override = task.payload.get("artifact_path")
         if artifact_override:
             artifact = Path(artifact_override)
-        write_json(artifact, out)
+        write_data_artifact(artifact, out, title="Workload Result")
         out["artifact"] = str(artifact)
         return out
 
@@ -517,11 +524,11 @@ class AnalyzerAgent(Agent):
         return task.kind == "analyze"
 
     def run(self, _task: Task, ctx: AgentContext) -> dict[str, Any]:
-        baseline = read_json(ctx.run_dir / "metrics_baseline.json", [])
-        post = read_json(ctx.run_dir / "metrics_post_workload.json", [])
+        baseline = read_data_artifact(ctx.run_dir / "metrics_baseline.md", [])
+        post = read_data_artifact(ctx.run_dir / "metrics_post_workload.md", [])
         summary = {"baseline": self._summarize(baseline), "post_workload": self._summarize(post)}
-        analysis_file = ctx.run_dir / "analysis.json"
-        write_json(analysis_file, summary)
+        analysis_file = ctx.run_dir / "analysis.md"
+        write_data_artifact(analysis_file, summary, title="Analysis Summary")
         return {"artifact": str(analysis_file), "summary": summary}
 
     def _summarize(self, records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -574,8 +581,8 @@ class BenchmarkCycleAgent(Agent):
         bench_dir.mkdir(parents=True, exist_ok=True)
 
         baseline_records = self.collector.collect(samples=samples, interval_sec=interval_sec)
-        baseline_path = bench_dir / "metrics_baseline.json"
-        write_json(baseline_path, baseline_records)
+        baseline_path = bench_dir / "metrics_baseline.md"
+        write_data_artifact(baseline_path, baseline_records, title=f"Benchmark {benchmark_id} Baseline Metrics")
         command_cwd = _iteration_dir(ctx.run_dir, iteration) / benchmark_id
 
         workload_task = Task(
@@ -583,15 +590,15 @@ class BenchmarkCycleAgent(Agent):
             kind="run_workload",
             payload={
                 "command": command,
-                "artifact_path": str(bench_dir / "workload_result.json"),
+                "artifact_path": str(bench_dir / "workload_result.md"),
                 "cwd_path": str(command_cwd),
             },
         )
         workload_result = self.runner.run(workload_task, ctx)
 
         post_records = self.collector.collect(samples=samples, interval_sec=interval_sec)
-        post_path = bench_dir / "metrics_post_workload.json"
-        write_json(post_path, post_records)
+        post_path = bench_dir / "metrics_post_workload.md"
+        write_data_artifact(post_path, post_records, title=f"Benchmark {benchmark_id} Post Metrics")
 
         result = {
             "iteration": iteration,
@@ -610,8 +617,8 @@ class BenchmarkCycleAgent(Agent):
             "workload": workload_result,
             "provenance": benchmark.get("provenance", {}),
         }
-        out = bench_dir / "benchmark_result.json"
-        write_json(out, result)
+        out = bench_dir / "benchmark_result.md"
+        write_data_artifact(out, result, title=f"Benchmark {benchmark_id} Result")
         result["artifact"] = str(out)
         return result
 
@@ -649,18 +656,16 @@ class BenchmarkExecutorAgent(Agent):
 
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
         iter_dir.mkdir(parents=True, exist_ok=True)
-        out = iter_dir / "execution_results.json"
         md_out = iter_dir / "execution.md"
         payload = {"iteration": iteration, "benchmarks_run": len(results), "results": results}
-        write_json(out, payload)
         write_text(md_out, _render_execution_md(payload))
-        payload["artifact"] = str(out)
+        payload["artifact"] = str(md_out)
         payload["artifact_md"] = str(md_out)
         return payload
 
 
 class LLMAnalysisAgent(Agent):
-    name = "llm-analysis"
+    name = "analyzer"
 
     def __init__(self, workflow_backend: LLMWorkflowBackend | None = None):
         self.workflow_backend = workflow_backend or HeuristicWorkflowBackend()
@@ -672,8 +677,8 @@ class LLMAnalysisAgent(Agent):
         intent = str(task.payload.get("intent", "")).strip()
         iteration = int(task.payload.get("iteration", 0))
         max_iterations = int(task.payload.get("max_iterations", 4))
-        kb_path = Path(task.payload.get("kb_path") or (ctx.run_dir / "run_state.json"))
-        kb = read_json(kb_path, {})
+        kb_path = Path(task.payload.get("kb_path") or (ctx.run_dir / "run_state.md"))
+        kb = read_data_artifact(kb_path, {})
         current_model = (
             kb.get("current_knowledge_model", {})
             if isinstance(kb.get("current_knowledge_model", {}), dict)
@@ -681,6 +686,7 @@ class LLMAnalysisAgent(Agent):
         )
         plan = task.payload.get("plan", {})
         execution_results = task.payload.get("execution_results", [])
+        current_question = str(plan.get("current_question", kb.get("current_question", ""))).strip()
 
         decision = self.workflow_backend.analyze_results(
             intent=intent,
@@ -742,24 +748,37 @@ class LLMAnalysisAgent(Agent):
                 "timestamp": time.time(),
             }
         )
-        kb_files = update_markdown_knowledge_base(
-            ctx.run_dir,
-            intent=intent,
-            kb=kb,
-            knowledge_model=updated_model,
-            iteration=iteration,
-            analysis={
-                "summary": decision.summary,
-                "claims": decision.claims,
-                "covered_dimensions": covered,
-                "required_observability": decision.required_observability,
-            },
+        answer_text = _analysis_answer_text(
+            current_question=current_question,
+            decision_summary=decision.summary,
+            claims=decision.claims,
+            execution_results=execution_results,
         )
+        evidence_refs = _analysis_evidence_refs(
+            execution_results=execution_results,
+            claims=decision.claims,
+        )
+        resolved = _question_fully_answered(
+            current_question=current_question,
+            answer_text=answer_text,
+            evidence_refs=evidence_refs,
+            execution_results=execution_results,
+            veto_next_plan=decision.veto_next_plan,
+        )
+        if current_question:
+            kb_files = answer_question(
+                kb,
+                question_text=current_question,
+                answer=answer_text,
+                evidence=evidence_refs,
+                resolved=resolved,
+            )
+        else:
+            kb_files = {}
         kb.update(kb_files)
-        write_json(kb_path, kb)
+        write_data_artifact(kb_path, kb, title="Run State")
 
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
-        analysis_path = iter_dir / "analysis_update.json"
         analysis_md_path = iter_dir / "analysis.md"
         out = {
             "iteration": iteration,
@@ -775,14 +794,128 @@ class LLMAnalysisAgent(Agent):
             "required_observability": decision.required_observability,
             "contract_amendments": decision.contract_amendments,
             "planner": decision.planner,
+            "current_question": current_question,
+            "question_answer": answer_text,
+            "question_evidence": evidence_refs,
+            "question_resolved": resolved,
+            "proposed_follow_up_questions": _follow_up_question_candidates(
+                current_question=current_question,
+                required_observability=decision.required_observability,
+            ),
             "kb_artifact": str(kb_path),
             "knowledge_base_index_artifact": kb.get("knowledge_base_index_artifact"),
             "knowledge_base_frontier_artifact": kb.get("knowledge_base_frontier_artifact"),
         }
-        write_json(analysis_path, out)
         write_text(analysis_md_path, _render_analysis_md(out))
-        out["artifact"] = str(analysis_path)
+        out["artifact"] = str(analysis_md_path)
         out["artifact_md"] = str(analysis_md_path)
+        return out
+
+
+class BookBuilderAgent(Agent):
+    name = "book-builder"
+
+    def __init__(self, workflow_backend: LLMWorkflowBackend | None = None):
+        self.workflow_backend = workflow_backend or HeuristicWorkflowBackend()
+
+    def can_handle(self, task: Task) -> bool:
+        return task.kind == "book_build_update"
+
+    def run(self, task: Task, ctx: AgentContext) -> dict[str, Any]:
+        intent = str(task.payload.get("intent", "")).strip()
+        iteration = int(task.payload.get("iteration", 0))
+        kb_path = Path(task.payload.get("kb_path") or (ctx.run_dir / "run_state.md"))
+        kb = read_data_artifact(kb_path, {})
+        proposed_questions = task.payload.get("proposed_follow_up_questions", [])
+        if not isinstance(proposed_questions, list):
+            proposed_questions = []
+        mode = str(task.payload.get("mode", "consolidate")).strip() or "consolidate"
+        book_path = str(kb.get("knowledge_base_book_artifact", "")).strip()
+        book_markdown = _read_text_artifact(book_path)
+        iter_dir = _iteration_dir(ctx.run_dir, iteration)
+        iter_dir.mkdir(parents=True, exist_ok=True)
+        effective_intent = intent or str(kb.get("intent", "")).strip()
+        section_questions_artifact = ""
+        section_questions_status = "not-requested"
+        book_backend = self.workflow_backend
+        if (
+            mode == "initialize"
+            and isinstance(self.workflow_backend, HeuristicWorkflowBackend)
+            and openai_completion_available()
+            and os.getenv("GPU_PROFILER_ENABLE_LIVE_INIT_BOOK_BUILDER", "1") != "0"
+        ):
+            book_backend = ResilientWorkflowBackend(
+                primary=OpenAIWorkflowBackend(model=os.getenv("GPU_PROFILER_BOOK_BUILDER_MODEL", "gpt-5.4")),
+                fallback=self.workflow_backend,
+            )
+        decision = book_backend.build_book(
+            intent=effective_intent,
+            kb=kb,
+            iteration=iteration,
+            book_markdown=book_markdown,
+            mode="initialize_structure" if mode == "initialize" else mode,
+            proposed_questions=proposed_questions,
+        )
+        if str(decision.book_markdown).strip():
+            write_text(Path(book_path), decision.book_markdown)
+        if (
+            mode == "initialize"
+            and openai_completion_available()
+            and os.getenv("GPU_PROFILER_ENABLE_LIVE_INIT_BOOK_BUILDER", "1") != "0"
+        ):
+            section_memos: list[str] = []
+            try:
+                for section in list_book_sections(kb):
+                    section_heading = str(section.get("section", "")).strip()
+                    if not section_heading:
+                        continue
+                    section_markdown = _render_section_questions_context(section)
+                    question_md = generate_book_builder_section_questions(
+                        intent=effective_intent,
+                        chapter_heading=str(section.get("chapter", "")).strip(),
+                        section_heading=section_heading,
+                        section_markdown=section_markdown,
+                        model=os.getenv("GPU_PROFILER_BOOK_BUILDER_MODEL", "gpt-5.4"),
+                        count=10,
+                    )
+                    questions = _parse_generated_question_blocks(question_md)
+                    if questions:
+                        set_section_questions(kb, section_heading=section_heading, questions=questions)
+                    section_memos.append(f"## {section_heading}\n\n{question_md.strip()}\n")
+                if section_memos:
+                    questions_path = iter_dir / "book_builder_questions.md"
+                    write_text(questions_path, "\n".join(section_memos).strip() + "\n")
+                    section_questions_artifact = str(questions_path)
+                    section_questions_status = "completed"
+                else:
+                    section_questions_status = "empty"
+            except Exception as exc:  # noqa: BLE001
+                section_questions_status = f"unavailable: {exc}"
+        kb_files = consolidate_markdown_knowledge_base(
+            ctx.run_dir,
+            intent=effective_intent,
+            kb=kb,
+            iteration=iteration,
+            proposed_questions=proposed_questions,
+        )
+        kb.update(kb_files)
+        write_data_artifact(kb_path, kb, title="Run State")
+        out = {
+            "iteration": iteration,
+            "planner": decision.planner,
+            "reason": decision.reason,
+            "kb_artifact": str(kb_path),
+            "knowledge_base_book_artifact": kb.get("knowledge_base_book_artifact"),
+            "knowledge_base_index_artifact": kb.get("knowledge_base_index_artifact"),
+            "knowledge_base_frontier_artifact": kb.get("knowledge_base_frontier_artifact"),
+            "proposed_follow_up_questions": proposed_questions,
+            "initial_question_seed_artifact": section_questions_artifact,
+            "initial_question_seed_status": section_questions_status,
+        }
+        summary_md_path = iter_dir / "book_builder.md"
+        write_text(summary_md_path, _render_book_builder_md(out))
+        out["artifact"] = str(summary_md_path)
+        out["artifact_md"] = str(summary_md_path)
         return out
 
 
@@ -797,19 +930,14 @@ class CommunicationMonitorAgent(Agent):
         if not isinstance(event, dict):
             raise ValueError("monitor_communications requires event payload")
 
-        global_json_path = ctx.run_dir / "agent_conversation.json"
         global_md_path = ctx.run_dir / "agent_conversation.md"
-        events = read_json(global_json_path, [])
-        if not isinstance(events, list):
-            events = []
+        events = self._read_conversation_events(global_md_path)
         events.append(event)
-        write_json(global_json_path, events)
         write_text(global_md_path, _render_agent_conversation(events, ctx.run_id))
-        latest_turn = _render_agent_conversation_turn(event, len(events))
         latest_screen_line = _render_agent_conversation_screen_line(event, len(events))
 
         result: dict[str, Any] = {
-            "artifact": str(global_json_path),
+            "artifact": str(global_md_path),
             "artifact_md": str(global_md_path),
             "events_recorded": len(events),
             "screen_output": latest_screen_line,
@@ -820,19 +948,26 @@ class CommunicationMonitorAgent(Agent):
             try:
                 iter_dir = _iteration_dir(ctx.run_dir, int(iteration))
                 iter_dir.mkdir(parents=True, exist_ok=True)
-                iter_json_path = iter_dir / "conversation.json"
                 iter_md_path = iter_dir / "conversation.md"
-                iter_events = read_json(iter_json_path, [])
-                if not isinstance(iter_events, list):
-                    iter_events = []
+                iter_events = self._read_conversation_events(iter_md_path)
                 iter_events.append(event)
-                write_json(iter_json_path, iter_events)
                 write_text(iter_md_path, _render_agent_conversation(iter_events, f"{ctx.run_id} iter {int(iteration):02d}"))
-                result["iteration_artifact"] = str(iter_json_path)
+                result["iteration_artifact"] = str(iter_md_path)
                 result["iteration_artifact_md"] = str(iter_md_path)
             except Exception:
                 pass
         return result
+
+    def _read_conversation_events(self, path: Path) -> list[dict[str, Any]]:
+        if not path.exists():
+            return []
+        text = path.read_text(encoding="utf-8")
+        events: list[dict[str, Any]] = []
+        for match in re.finditer(r"^## Turn \d+\n(.*?)(?=^## Turn \d+\n|\Z)", text, flags=re.MULTILINE | re.DOTALL):
+            body = match.group(1).strip()
+            if body:
+                events.append({"summary": "", "message": body})
+        return events
 
 
 class AutonomousReporterAgent(Agent):
@@ -842,7 +977,7 @@ class AutonomousReporterAgent(Agent):
         return task.kind == "autonomous_report"
 
     def run(self, _task: Task, ctx: AgentContext) -> dict[str, Any]:
-        model = read_json(ctx.run_dir / "run_state.json", {})
+        model = read_data_artifact(ctx.run_dir / "run_state.md", {})
         run_state = model.get("run_state", {}) if isinstance(model.get("run_state", {}), dict) else {}
         lines = [
             f"# Autonomous GPU Performance Model ({ctx.run_id})",
@@ -894,8 +1029,8 @@ class ReporterAgent(Agent):
         return task.kind == "report"
 
     def run(self, _task: Task, ctx: AgentContext) -> dict[str, Any]:
-        analysis = read_json(ctx.run_dir / "analysis.json", {})
-        workload = read_json(ctx.run_dir / "workload_result.json", {})
+        analysis = read_data_artifact(ctx.run_dir / "analysis.md", {})
+        workload = read_data_artifact(ctx.run_dir / "workload_result.md", {})
         lines = [
             f"# GPU Auto Profiling Report ({ctx.run_id})",
             "",
@@ -909,12 +1044,12 @@ class ReporterAgent(Agent):
             f"- post_workload: `{analysis.get('post_workload', {})}`",
             "",
             "## Artifacts",
-            "- metrics_baseline.json",
-            "- system_info.json",
-            "- workload_result.json",
-            "- metrics_post_workload.json",
-            "- analysis.json",
-            "- run_log.json",
+            "- metrics_baseline.md",
+            "- system_info.md",
+            "- workload_result.md",
+            "- metrics_post_workload.md",
+            "- analysis.md",
+            "- run_log.md",
         ]
         report_path = ctx.run_dir / "report.md"
         write_text(report_path, "\n".join(lines))
@@ -936,6 +1071,7 @@ def default_agents(workflow_backend: LLMWorkflowBackend | None = None) -> list[A
         BenchmarkExecutorAgent(),
         AnalyzerAgent(),
         LLMAnalysisAgent(workflow_backend=backend),
+        BookBuilderAgent(workflow_backend=backend),
         AutonomousReporterAgent(),
         ReporterAgent(),
     ]
@@ -1582,6 +1718,240 @@ def _render_analysis_md(analysis: dict[str, Any]) -> str:
             lines.append(
                 f"- path: `{item.get('path')}` | change: {item.get('change')} | priority: `{item.get('priority')}`"
             )
+    current_question = str(analysis.get("current_question", "")).strip()
+    if current_question:
+        lines.extend(
+            [
+                "",
+                "## Question Update",
+                f"- current question: {current_question}",
+                f"- resolved: `{analysis.get('question_resolved', False)}`",
+                "",
+                "### Answer",
+                str(analysis.get("question_answer", "")).strip() or "No answer recorded.",
+                "",
+                "### Question Evidence",
+            ]
+        )
+        question_evidence = [str(x).strip() for x in analysis.get("question_evidence", []) if str(x).strip()]
+        if question_evidence:
+            for item in question_evidence:
+                lines.append(f"- {item}")
+        else:
+            lines.append("- none recorded")
+    proposed = analysis.get("proposed_follow_up_questions", [])
+    if isinstance(proposed, list) and proposed:
+        lines.extend(["", "## Proposed Follow-Up Questions"])
+        for item in proposed:
+            if isinstance(item, dict):
+                lines.append(f"- question: {item.get('question', '')} | why: {item.get('why_it_matters', '')}")
+    return "\n".join(lines)
+
+
+def _analysis_answer_text(
+    *,
+    current_question: str,
+    decision_summary: str,
+    claims: list[dict[str, Any]],
+    execution_results: list[dict[str, Any]],
+) -> str:
+    claim_texts = [str(item.get("claim", "")).strip() for item in claims if isinstance(item, dict) and str(item.get("claim", "")).strip()]
+    if claim_texts:
+        joined = " ".join(claim_texts[:3])
+        if current_question:
+            return f"Question addressed: {current_question} Causal answer: {joined}"
+        return joined
+    successful = [
+        item
+        for item in execution_results
+        if isinstance(item, dict)
+        and isinstance(item.get("workload", {}), dict)
+        and item.get("workload", {}).get("returncode") == 0
+        and not item.get("workload", {}).get("skipped", False)
+    ]
+    if successful:
+        benchmark_ids = ", ".join(str(item.get("benchmark_id", "")).strip() for item in successful if str(item.get("benchmark_id", "")).strip())
+        summary = str(decision_summary or "").strip() or "Successful execution produced usable evidence."
+        return f"{summary} The observed evidence comes from benchmark execution ({benchmark_ids})."
+    return str(decision_summary or "").strip() or "No causal answer could be established from the recorded execution results."
+
+
+def _analysis_evidence_refs(*, execution_results: list[dict[str, Any]], claims: list[dict[str, Any]]) -> list[str]:
+    refs: list[str] = []
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        evidence = claim.get("evidence", {}) if isinstance(claim.get("evidence", {}), dict) else {}
+        for value in evidence.values():
+            text = str(value).strip()
+            if text and text not in refs:
+                refs.append(text)
+    for item in execution_results:
+        if not isinstance(item, dict):
+            continue
+        for key in ("analysis_artifact", "workload_artifact"):
+            text = str(item.get(key, "")).strip()
+            if text and text not in refs:
+                refs.append(text)
+        raw_artifacts = item.get("raw_artifacts", []) if isinstance(item.get("raw_artifacts", []), list) else []
+        for artifact in raw_artifacts:
+            text = str(artifact).strip()
+            if text and text not in refs:
+                refs.append(text)
+    return refs[:12]
+
+
+def _question_fully_answered(
+    *,
+    current_question: str,
+    answer_text: str,
+    evidence_refs: list[str],
+    execution_results: list[dict[str, Any]],
+    veto_next_plan: bool,
+) -> bool:
+    if veto_next_plan:
+        return False
+    if not current_question.strip() or not answer_text.strip() or not evidence_refs:
+        return False
+    successful = [
+        item
+        for item in execution_results
+        if isinstance(item, dict)
+        and isinstance(item.get("workload", {}), dict)
+        and item.get("workload", {}).get("returncode") == 0
+        and not item.get("workload", {}).get("skipped", False)
+    ]
+    return bool(successful)
+
+
+def _follow_up_question_candidates(
+    *,
+    current_question: str,
+    required_observability: list[str],
+) -> list[dict[str, Any]]:
+    if not isinstance(required_observability, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in required_observability[:4]:
+        text = str(item).strip()
+        if not text:
+            continue
+        out.append(
+            {
+                "question": text if text.endswith("?") else f"What additional evidence is needed to resolve: {text}?",
+                "why_it_matters": f"This follow-up closes a remaining gap exposed while answering: {current_question}".strip(),
+                "context": "",
+            }
+        )
+    return out
+
+
+def _render_section_questions_context(section: dict[str, Any]) -> str:
+    evidence = [str(item).strip() for item in section.get("evidence", []) if str(item).strip()]
+    lines = [
+        f"### {section.get('section', '')}",
+        "",
+        "Summary",
+        str(section.get("summary", "")).strip() or "No summary recorded yet.",
+        "",
+        "Mechanism",
+        str(section.get("mechanism", "")).strip() or "No mechanism recorded yet.",
+        "",
+        "Evidence",
+    ]
+    if evidence:
+        lines.extend(f"- {item}" for item in evidence)
+    else:
+        lines.append("- No evidence recorded yet.")
+    lines.extend(
+        [
+            "",
+            "Current Understanding",
+            str(section.get("current_understanding", "")).strip() or "No current understanding recorded yet.",
+            "",
+            "Uncertainty",
+            str(section.get("uncertainty", "")).strip() or "No explicit uncertainty recorded yet.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _parse_generated_question_blocks(text: str) -> list[dict[str, Any]]:
+    questions: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+
+    def flush() -> None:
+        nonlocal current
+        if current and str(current.get("question", "")).strip():
+            questions.append(
+                {
+                    "question": str(current.get("question", "")).strip(),
+                    "why_it_matters": str(current.get("why_it_matters", "")).strip(),
+                    "context": str(current.get("context", "")).strip(),
+                    "answer": "",
+                    "evidence": [],
+                    "resolved": "No",
+                }
+            )
+        current = None
+
+    for raw_line in str(text or "").splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("- Question:"):
+            flush()
+            current = {"question": stripped.split(":", 1)[1].strip()}
+            continue
+        if current is None:
+            continue
+        if stripped.startswith("Why It Matters:") or stripped.startswith("Why it matters:"):
+            current["why_it_matters"] = stripped.split(":", 1)[1].strip()
+            continue
+        if stripped.startswith("Context:"):
+            current["context"] = stripped.split(":", 1)[1].strip()
+            continue
+        if stripped:
+            current["context"] = _merge_text(current.get("context", ""), stripped)
+    flush()
+    return questions
+
+
+def _merge_text(existing: Any, new_text: Any) -> str:
+    left = str(existing or "").strip()
+    right = str(new_text or "").strip()
+    if not right:
+        return left
+    if not left:
+        return right
+    if right in left:
+        return left
+    return f"{left} {right}".strip()
+
+
+def _render_book_builder_md(result: dict[str, Any]) -> str:
+    lines = [
+        f"# Iteration {result.get('iteration')} Book Builder Update",
+        "",
+        "## Metadata",
+        f"- planner: `{result.get('planner')}`",
+        f"- reason: {result.get('reason')}",
+        "",
+        "## Initialization Question Seed",
+        f"- status: `{result.get('initial_question_seed_status', 'not-requested')}`",
+        f"- artifact: `{result.get('initial_question_seed_artifact', '')}`",
+        "",
+        "## Knowledge Book",
+        f"- book: `{result.get('knowledge_base_book_artifact', '')}`",
+        f"- index: `{result.get('knowledge_base_index_artifact', '')}`",
+        f"- frontier: `{result.get('knowledge_base_frontier_artifact', '')}`",
+    ]
+    proposed = result.get("proposed_follow_up_questions", [])
+    if isinstance(proposed, list) and proposed:
+        lines.extend(["", "## Follow-Up Questions Considered"])
+        for item in proposed:
+            if isinstance(item, dict):
+                lines.append(f"- {item.get('question', '')}")
     return "\n".join(lines)
 
 
@@ -1644,7 +2014,7 @@ def _materialize_generated_files(iter_dir: Path, benchmarks: list[dict[str, Any]
                 continue
             if ".." in path or path.startswith("/"):
                 continue
-            if not path.endswith((".cu", ".md", ".json")):
+            if not path.endswith((".cu", ".md", ".txt")):
                 continue
             out_path = iter_dir / bench_id / path
             out_path.parent.mkdir(parents=True, exist_ok=True)

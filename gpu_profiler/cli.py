@@ -1,8 +1,8 @@
 import argparse
-import json
 from pathlib import Path
 
 from .core.models import RetryPolicy
+from .core.store import write_data_artifact
 from .runtime.orchestrator import build_default_orchestrator, build_orchestrator_with_planner
 
 
@@ -70,5 +70,5 @@ def _write_final_result(result: dict) -> None:
     run_dir = Path(str(result.get("run_dir", "")).strip())
     if not run_dir:
         return
-    output_path = run_dir / "final_result.json"
-    output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    output_path = run_dir / "final_result.md"
+    write_data_artifact(output_path, result, title="Final Result")

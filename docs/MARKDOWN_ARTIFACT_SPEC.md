@@ -4,8 +4,8 @@ This repository is moving to a markdown-first artifact model.
 
 Rule of thumb:
 
-- `*.md` is the canonical representation for agent-written research artifacts.
-- `*.json` is reserved for execution records, debug logs, raw measurements, caches, and machine-oriented indexes.
+- `*.md` is the canonical representation for persistent agent-written and runtime-written artifacts.
+- `*.json` should not be used for persisted run artifacts in the autonomous profiling loop.
 
 The orchestrator should prefer parsing markdown artifacts with deterministic section rules instead of asking agents to emit large JSON payloads.
 
@@ -18,8 +18,6 @@ Per iteration, the preferred canonical research artifacts are:
 - `analysis.md`
 
 The canonical semantic source of truth is the markdown knowledge base under `knowledge_base/`.
-
-Operational sidecars may still exist during transition, but they are not the long-term source of truth for meaning.
 
 ## Section Rules
 
@@ -36,7 +34,6 @@ Use:
 Avoid:
 
 - arbitrary heading names for the same concept
-- large embedded JSON blocks
 - freeform structure with no stable anchors
 
 ## research.md
@@ -92,12 +89,9 @@ Each claim should use a `### Claim N` subsection with:
 - `#### Dimensions`
 - `#### Evidence`
 
-## Transitional Guidance
+## Operational Guidance
 
-During migration:
-
-- existing JSON sidecars may remain for compatibility
 - planning should rely on the KB plus the selected current question, not separate proposal/request memos
 - markdown should become more detailed, not less
 - parsers should read markdown first when possible
-- JSON should be derived from markdown or used only for operational records
+- operational run-state data may be embedded inside markdown artifacts when structured recovery is needed
