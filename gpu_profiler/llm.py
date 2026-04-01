@@ -1771,6 +1771,16 @@ def _compact_planner_kb(
                 "question": _trim_text(item.get("question", ""), 220),
                 "source": _trim_text(item.get("source", ""), 24),
                 "section_refs": [_trim_text(ref, 80) for ref in item.get("section_refs", []) if str(ref).strip()][:3],
+                "unmet_frontier_criteria": [
+                    _trim_text(ref, 160)
+                    for ref in item.get("unmet_frontier_criteria", [])
+                    if str(ref).strip()
+                ][:3],
+                "unsatisfied_prerequisites": [
+                    _trim_text(ref, 80)
+                    for ref in item.get("unsatisfied_prerequisites", [])
+                    if str(ref).strip()
+                ][:3],
             }
         )
     return {
@@ -1836,7 +1846,7 @@ def _next_frontier_question(kb: dict[str, Any], focus_dimensions: list[str]) -> 
         for item in explicit_candidates:
             if not isinstance(item, dict):
                 continue
-            text = str(item.get("question", "")).strip()
+            text = _frontier_candidate_question(item)
             if text:
                 return text
     explicit_questions = kb.get("knowledge_base_frontier_questions", [])
@@ -1859,6 +1869,18 @@ def _next_frontier_question(kb: dict[str, Any], focus_dimensions: list[str]) -> 
     return "What is the next bottom-up question needed to extend the current known frontier of this GPU knowledge base?"
 
 
+def _frontier_candidate_question(item: dict[str, Any]) -> str:
+    section_refs = [str(ref).strip() for ref in item.get("section_refs", []) if str(ref).strip()]
+    section = section_refs[0] if section_refs else "this section"
+    unmet_prereqs = [str(ref).strip() for ref in item.get("unsatisfied_prerequisites", []) if str(ref).strip()]
+    if unmet_prereqs:
+        return f"What prerequisite evidence is still needed before {section} can advance, starting with {unmet_prereqs[0]}?"
+    unmet_criteria = [str(ref).strip() for ref in item.get("unmet_frontier_criteria", []) if str(ref).strip()]
+    if unmet_criteria:
+        return f"For {section}, what evidence is still needed to satisfy this frontier criterion: {unmet_criteria[0]}?"
+    return str(item.get("question", "")).strip()
+
+
 def _question_text_from_memo(question_memo: str) -> str:
     for raw_line in str(question_memo or "").splitlines():
         line = raw_line.strip()
@@ -1879,7 +1901,7 @@ def _render_planner_proposal_prompt(payload: dict[str, Any]) -> str:
     knowledge_book_excerpt = str(kb.get("knowledge_base_book_excerpt", "")).strip() or "No knowledge-base excerpt recorded."
     frontier_questions = "\n".join(f"- {item}" for item in kb.get("knowledge_base_frontier_questions", []) if str(item).strip()) or "- none recorded"
     frontier_candidates = "\n".join(
-        f"- {item.get('question', '')} | source={item.get('source', '')} | refs={item.get('section_refs', [])}"
+        f"- {item.get('question', '')} | source={item.get('source', '')} | refs={item.get('section_refs', [])} | unmet_criteria={item.get('unmet_frontier_criteria', [])} | unsatisfied_prerequisites={item.get('unsatisfied_prerequisites', [])}"
         for item in kb.get("knowledge_base_frontier_candidates", [])
         if isinstance(item, dict) and str(item.get("question", "")).strip()
     ) or "- none recorded"

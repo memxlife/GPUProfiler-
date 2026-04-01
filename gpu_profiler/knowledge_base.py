@@ -136,6 +136,7 @@ def extract_frontier_candidates(kb: dict[str, Any]) -> list[dict[str, Any]]:
         item["status"] = section_meta.get("status", "")
         item["prerequisites"] = section_meta.get("prerequisites", [])
         item["frontier_criteria"] = section_meta.get("frontier_criteria", [])
+        item["unmet_frontier_criteria"] = _unmet_frontier_criteria(section_meta)
         item["unsatisfied_prerequisites"] = _unsatisfied_prerequisites(
             section_meta.get("prerequisites", []),
             section_index,
@@ -923,6 +924,22 @@ def _unsatisfied_prerequisites(prerequisites: list[Any], section_index: dict[str
         if status != "known":
             missing.append(text)
     return missing
+
+
+def _unmet_frontier_criteria(section: dict[str, Any]) -> list[str]:
+    criteria = [str(x).strip() for x in section.get("frontier_criteria", []) if str(x).strip()]
+    status = str(section.get("status", "")).strip().lower()
+    if status == "known":
+        return []
+    local_findings = str(section.get("local_findings", "")).strip()
+    marker = "Frontier criteria remain incomplete:"
+    if marker in local_findings:
+        tail = local_findings.split(marker, 1)[1].strip()
+        tail = tail.rstrip(".")
+        parsed = [item.strip() for item in tail.split(";") if item.strip()]
+        if parsed:
+            return parsed
+    return criteria
 
 
 def _initial_findings_md() -> str:
