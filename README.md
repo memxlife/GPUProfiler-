@@ -2,6 +2,8 @@
 
 A tiny todo CLI built with `argparse` and JSON storage.
 
+For the current autonomous GPU research system contract, see `BUILD_PROMPT.md`.
+
 ## Commands
 
 - `python todo.py add "buy milk"`
