@@ -37,7 +37,7 @@ Key architectural decisions now implemented:
 
 Run root:
 
-- `performance_model.json`
+- `run_state.json`
 - `knowledge_model.json`
 - `run_log.json`
 - `autonomous_report.md`
@@ -172,4 +172,3 @@ If the other machine still shows the same issues, the next changes should be:
 2. parse memo outputs into thin sidecar JSON deterministically in Python
 3. tighten acceptance so placeholder implementations cannot pass as feasible
 4. add a small standalone OpenAI diagnostics script for transport debugging
-

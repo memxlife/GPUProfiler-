@@ -736,7 +736,7 @@ class LLMAnalysisAgent(Agent):
         intent = str(task.payload.get("intent", "")).strip()
         iteration = int(task.payload.get("iteration", 0))
         max_iterations = int(task.payload.get("max_iterations", 4))
-        kb_path = Path(task.payload.get("kb_path") or (ctx.run_dir / "performance_model.json"))
+        kb_path = Path(task.payload.get("kb_path") or (ctx.run_dir / "run_state.json"))
         kb = read_json(kb_path, {})
         knowledge_model_path = Path(task.payload.get("knowledge_model_path") or (ctx.run_dir / "knowledge_model.json"))
         current_model = read_json(knowledge_model_path, {})
@@ -894,7 +894,7 @@ class AutonomousReporterAgent(Agent):
         return task.kind == "autonomous_report"
 
     def run(self, _task: Task, ctx: AgentContext) -> dict[str, Any]:
-        model = read_json(ctx.run_dir / "performance_model.json", {})
+        model = read_json(ctx.run_dir / "run_state.json", {})
         run_state = model.get("run_state", {}) if isinstance(model.get("run_state", {}), dict) else {}
         lines = [
             f"# Autonomous GPU Performance Model ({ctx.run_id})",

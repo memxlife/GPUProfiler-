@@ -133,7 +133,7 @@ class Orchestrator:
                 "current_knowledge_model": initial_knowledge_model,
                 "knowledge_model_artifact": str(knowledge_model_path),
             }
-            kb_path = run_dir / "performance_model.json"
+            kb_path = run_dir / "run_state.json"
             write_json(kb_path, knowledge_base)
 
             completed: list[Task] = []

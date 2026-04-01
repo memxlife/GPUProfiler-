@@ -149,7 +149,7 @@ def test_autonomous_run_produces_model_artifacts(tmp_path):
     assert run_dir.exists()
     assert result["mode"] == "autonomous"
 
-    assert (run_dir / "performance_model.json").exists()
+    assert (run_dir / "run_state.json").exists()
     assert (run_dir / "knowledge_model.json").exists()
     assert (run_dir / "autonomous_report.md").exists()
     assert not (run_dir / "iterations" / "iter_00" / "schema_contract.json").exists()
@@ -424,7 +424,7 @@ def test_orchestrator_prefers_proposal_markdown_for_current_proposal(tmp_path):
         ),
         encoding="utf-8",
     )
-    kb_path = tmp_path / "performance_model.json"
+    kb_path = tmp_path / "run_state.json"
     kb_path.write_text(json.dumps({"proposal_history": []}), encoding="utf-8")
     orchestrator = Orchestrator(agents=[], emit_live_trace=False, emit_live_conversation=False)
 
@@ -469,7 +469,7 @@ def test_orchestrator_prefers_research_markdown_for_history(tmp_path):
         ),
         encoding="utf-8",
     )
-    kb_path = tmp_path / "performance_model.json"
+    kb_path = tmp_path / "run_state.json"
     kb_path.write_text(json.dumps({"research_history": [], "target_dimensions": []}), encoding="utf-8")
     orchestrator = Orchestrator(agents=[], emit_live_trace=False, emit_live_conversation=False)
 
