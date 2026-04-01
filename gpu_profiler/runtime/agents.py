@@ -1237,66 +1237,6 @@ def _build_feasibility_report(
     }
 
 
-def _render_benchmark_plan_md(plan: dict[str, Any]) -> str:
-    benchmark_plan = plan.get("benchmark_plan", {}) if isinstance(plan.get("benchmark_plan", {}), dict) else {}
-    lines = [
-        f"# Iteration {plan.get('iteration')} Benchmark Plan",
-        "",
-        "## Metadata",
-        f"- planner: `{plan.get('planner')}`",
-        f"- reason: {plan.get('reason')}",
-        "",
-        "## Benchmark Plan Summary",
-        benchmark_plan.get("plan_summary", ""),
-        "",
-        "## Current Question",
-        str(plan.get("current_question", "")).strip() or "No current question recorded.",
-        "",
-        "## Target Nodes",
-    ]
-    target_nodes = [str(x).strip() for x in benchmark_plan.get("target_nodes", []) if str(x).strip()]
-    if target_nodes:
-        for item in target_nodes:
-            lines.append(f"- {item}")
-    else:
-        lines.append("- none")
-    lines.extend(["", "## Planned Benchmarks"])
-    for index, item in enumerate(benchmark_plan.get("benchmarks", []), start=1):
-        lines.extend(
-            [
-                f"### Benchmark {index}",
-                f"- id: `{item.get('id', '')}`",
-                f"- title: {item.get('title', '')}",
-                f"- benchmark role: {item.get('benchmark_role', '')}",
-                f"- objective: {item.get('objective', '')}",
-                f"- hypothesis: {item.get('hypothesis', '')}",
-                f"- rationale: {item.get('rationale', '')}",
-                "#### Target Nodes",
-            ]
-        )
-        target_node_ids = [str(x).strip() for x in item.get("target_node_ids", []) if str(x).strip()]
-        if target_node_ids:
-            for node in target_node_ids:
-                lines.append(f"- {node}")
-        else:
-            lines.append("- none")
-        lines.append("#### Required Evidence")
-        required_evidence = [str(x).strip() for x in item.get("required_evidence", []) if str(x).strip()]
-        if required_evidence:
-            for evidence in required_evidence:
-                lines.append(f"- {evidence}")
-        else:
-            lines.append("- none specified")
-        lines.extend(
-            [
-                "#### What Success Unlocks",
-                str(item.get("success_unlocks", "")).strip() or str(item.get("rationale", "")).strip() or "Not specified.",
-                "",
-            ]
-        )
-    return "\n".join(lines)
-
-
 def _render_research_request_md(result: dict[str, Any]) -> str:
     request = result.get("research_request", {}) if isinstance(result.get("research_request", {}), dict) else {}
     lines = [
