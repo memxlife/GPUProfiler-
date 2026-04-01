@@ -42,7 +42,22 @@ def update_markdown_knowledge_base(
     analysis: dict[str, Any],
 ) -> dict[str, str]:
     files = initialize_markdown_knowledge_base(run_dir, intent)
-    frontier_questions = _frontier_questions(kb=kb, knowledge_model=knowledge_model, analysis=analysis)
+    update_path = Path(files["knowledge_base_dir"]) / "updates" / f"iter_{iteration:02d}.md"
+    analysis_ref = f"../iterations/iter_{iteration:02d}/analysis.md"
+    write_text(update_path, _render_iteration_update_md(iteration=iteration, analysis=analysis))
+    _apply_analysis_to_chapters(
+        files=files,
+        analysis=analysis,
+        covered_dimensions=kb.get("covered_dimensions", []),
+        update_ref=f"updates/iter_{iteration:02d}.md",
+        analysis_ref=analysis_ref,
+    )
+    frontier_questions = _frontier_questions(
+        kb=kb,
+        knowledge_model=knowledge_model,
+        analysis=analysis,
+        files=files,
+    )
     write_text(
         Path(files["knowledge_base_index_artifact"]),
         _render_kb_index(intent=intent, files=files, kb=kb, knowledge_model=knowledge_model),
@@ -56,8 +71,6 @@ def update_markdown_knowledge_base(
             coverage_score=kb.get("coverage_score", 0.0),
         ),
     )
-    update_path = Path(files["knowledge_base_dir"]) / "updates" / f"iter_{iteration:02d}.md"
-    write_text(update_path, _render_iteration_update_md(iteration=iteration, analysis=analysis))
     write_text(
         Path(files["knowledge_base_findings_artifact"]),
         _render_local_findings_md(kb=kb),
@@ -257,6 +270,41 @@ def _render_iteration_update_md(*, iteration: int, analysis: dict[str, Any]) -> 
     return "\n".join(lines)
 
 
+def _apply_analysis_to_chapters(
+    *,
+    files: dict[str, str],
+    analysis: dict[str, Any],
+    covered_dimensions: list[Any],
+    update_ref: str,
+    analysis_ref: str,
+) -> None:
+    for artifact_key in (
+        "knowledge_base_foundations_artifact",
+        "knowledge_base_memory_artifact",
+        "knowledge_base_resources_artifact",
+        "knowledge_base_modeling_artifact",
+    ):
+        path_text = str(files.get(artifact_key, "")).strip()
+        if not path_text:
+            continue
+        path = Path(path_text)
+        text = _read_text(path_text)
+        if not text:
+            continue
+        header, sections = _parse_chapter_document(text)
+        updated_sections = [
+            _update_section_from_analysis(
+                section=section,
+                analysis=analysis,
+                covered_dimensions=covered_dimensions,
+                update_ref=update_ref,
+                analysis_ref=analysis_ref,
+            )
+            for section in sections
+        ]
+        write_text(path, _render_chapter_document(header, updated_sections))
+
+
 def _render_local_findings_md(*, kb: dict[str, Any]) -> str:
     lines = [
         "# Local Findings",
@@ -274,8 +322,27 @@ def _render_local_findings_md(*, kb: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _frontier_questions(kb: dict[str, Any], knowledge_model: dict[str, Any], analysis: dict[str, Any]) -> list[str]:
+def _frontier_questions(
+    kb: dict[str, Any],
+    knowledge_model: dict[str, Any],
+    analysis: dict[str, Any],
+    files: dict[str, str] | None = None,
+) -> list[str]:
     questions: list[str] = []
+    if isinstance(files, dict):
+        for artifact_key in (
+            "knowledge_base_foundations_artifact",
+            "knowledge_base_memory_artifact",
+            "knowledge_base_resources_artifact",
+            "knowledge_base_modeling_artifact",
+        ):
+            path_text = str(files.get(artifact_key, "")).strip()
+            if not path_text:
+                continue
+            for item in _parse_open_questions_from_chapter(_read_text(path_text)):
+                text = str(item.get("question", "")).strip()
+                if text and text not in questions:
+                    questions.append(text)
     latest_research = kb.get("latest_research", {}) if isinstance(kb.get("latest_research", {}), dict) else {}
     for item in latest_research.get("unanswered_questions", []):
         text = str(item).strip()
@@ -360,34 +427,60 @@ def _parse_open_questions_from_chapter(text: str) -> list[dict[str, Any]]:
 
 
 def _parse_chapter_sections(text: str) -> list[dict[str, Any]]:
+    return _parse_chapter_document(text)[1]
+
+
+def _parse_chapter_document(text: str) -> tuple[list[str], list[dict[str, Any]]]:
+    header_lines: list[str] = []
     sections: list[dict[str, Any]] = []
     current_heading = ""
     current_lines: list[str] = []
+    in_sections = False
     for raw_line in str(text or "").splitlines():
         stripped = raw_line.strip()
         if stripped.startswith("#### "):
+            in_sections = True
             if current_heading:
                 sections.append(_parse_section_block(current_heading, current_lines))
             current_heading = stripped[5:].strip()
             current_lines = []
             continue
-        if current_heading:
+        if in_sections:
             current_lines.append(raw_line)
+        else:
+            header_lines.append(raw_line)
     if current_heading:
         sections.append(_parse_section_block(current_heading, current_lines))
-    return sections
+    return header_lines, sections
 
 
 def _parse_section_block(heading: str, lines: list[str]) -> dict[str, Any]:
     parsed: dict[str, Any] = {
         "section": heading,
         "section_order": _section_order_from_heading(heading),
+        "summary": "",
+        "mechanism": "",
+        "quantitative_understanding": "",
+        "evidence": [],
+        "cross_references": [],
         "status": "",
         "open_questions": [],
         "prerequisites": [],
         "frontier_criteria": [],
     }
     current_field = ""
+    paragraph_fields = {
+        "Summary": "summary",
+        "Mechanism": "mechanism",
+        "Quantitative Understanding": "quantitative_understanding",
+    }
+    list_fields = {
+        "Evidence": "evidence",
+        "Open Questions": "open_questions",
+        "Cross References": "cross_references",
+        "Prerequisites": "prerequisites",
+        "Frontier Criteria": "frontier_criteria",
+    }
     for raw_line in lines:
         stripped = raw_line.strip()
         if stripped in {
@@ -405,19 +498,242 @@ def _parse_section_block(heading: str, lines: list[str]) -> dict[str, Any]:
             continue
         if not current_field:
             continue
-        if current_field in {"Open Questions", "Prerequisites", "Frontier Criteria"} and stripped.startswith("- "):
+        if current_field in list_fields and stripped.startswith("- "):
             item = stripped[2:].strip()
             if item:
-                key = {
-                    "Open Questions": "open_questions",
-                    "Prerequisites": "prerequisites",
-                    "Frontier Criteria": "frontier_criteria",
-                }[current_field]
+                key = list_fields[current_field]
                 parsed[key].append(item)
             continue
         if current_field == "Status" and stripped:
             parsed["status"] = stripped
+            continue
+        if current_field in paragraph_fields and stripped:
+            key = paragraph_fields[current_field]
+            parsed[key] = f"{parsed[key]} {stripped}".strip()
     return parsed
+
+
+def _render_chapter_document(header_lines: list[str], sections: list[dict[str, Any]]) -> str:
+    lines = list(header_lines)
+    if lines and lines[-1].strip():
+        lines.append("")
+    for index, section in enumerate(sections):
+        if index:
+            lines.append("")
+        lines.extend(_render_section_block(section))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_section_block(section: dict[str, Any]) -> list[str]:
+    lines = [
+        f"#### {section.get('section', '')}",
+        "",
+        "Summary  ",
+        str(section.get("summary", "")).strip() or "No summary recorded.",
+        "",
+        "Mechanism  ",
+        str(section.get("mechanism", "")).strip() or "No mechanism recorded.",
+        "",
+        "Quantitative Understanding  ",
+        str(section.get("quantitative_understanding", "")).strip() or "No quantitative understanding recorded.",
+        "",
+        "Evidence  ",
+    ]
+    evidence = [str(x).strip() for x in section.get("evidence", []) if str(x).strip()]
+    if evidence:
+        for item in evidence:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- No evidence recorded.")
+    lines.extend(["", "Open Questions  "])
+    open_questions = [str(x).strip() for x in section.get("open_questions", []) if str(x).strip()]
+    if open_questions:
+        for item in open_questions:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- None")
+    lines.extend(["", "Cross References  "])
+    refs = [str(x).strip() for x in section.get("cross_references", []) if str(x).strip()]
+    if refs:
+        for item in refs:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- None")
+    lines.extend(
+        [
+            "",
+            "Status  ",
+            str(section.get("status", "")).strip() or "Unknown",
+            "",
+            "Prerequisites  ",
+        ]
+    )
+    prereqs = [str(x).strip() for x in section.get("prerequisites", []) if str(x).strip()]
+    if prereqs:
+        for item in prereqs:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- None")
+    lines.extend(["", "Frontier Criteria  "])
+    criteria = [str(x).strip() for x in section.get("frontier_criteria", []) if str(x).strip()]
+    if criteria:
+        for item in criteria:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- None")
+    return lines
+
+
+def _update_section_from_analysis(
+    *,
+    section: dict[str, Any],
+    analysis: dict[str, Any],
+    covered_dimensions: list[Any],
+    update_ref: str,
+    analysis_ref: str,
+) -> dict[str, Any]:
+    updated = dict(section)
+    matches = _claims_for_section(section, analysis.get("claims", []))
+    matched_dimensions = _matched_dimensions_for_section(section, covered_dimensions)
+    if not matches and not matched_dimensions:
+        return updated
+    if matches and str(updated.get("status", "")).strip().lower() in {"frontier", "unknown"}:
+        updated["status"] = "Known"
+    evidence = [str(x).strip() for x in updated.get("evidence", []) if str(x).strip()]
+    if update_ref not in evidence:
+        evidence.append(update_ref)
+    if analysis_ref not in evidence:
+        evidence.append(analysis_ref)
+    for claim in matches[:3]:
+        claim_text = str(claim.get("claim", "")).strip()
+        if claim_text:
+            claim_ref = f"Claim: {claim_text}"
+            if claim_ref not in evidence:
+                evidence.append(claim_ref)
+    updated["evidence"] = evidence[:10]
+    quantitative_update = _synthesize_quantitative_update(
+        section=updated,
+        matches=matches,
+        matched_dimensions=matched_dimensions,
+        analysis=analysis,
+        update_ref=update_ref,
+    )
+    if quantitative_update:
+        updated["quantitative_understanding"] = _merge_text_block(
+            str(updated.get("quantitative_understanding", "")).strip(),
+            quantitative_update,
+        )
+    if matches:
+        updated["open_questions"] = [
+            item
+            for item in updated.get("open_questions", [])
+            if not _question_answered_by_claims(str(item), matches, matched_dimensions)
+        ]
+    return updated
+
+
+def _claims_for_section(section: dict[str, Any], claims: list[Any]) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    tags = _section_tags(section)
+    for item in claims if isinstance(claims, list) else []:
+        if not isinstance(item, dict):
+            continue
+        dims = {str(x).strip().lower() for x in item.get("dimensions", []) if str(x).strip()}
+        claim_text = str(item.get("claim", "")).strip().lower()
+        if dims.intersection(tags) or any(tag in claim_text for tag in tags if len(tag) > 2):
+            matches.append(item)
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in matches:
+        key = str(item.get("claim", "")).strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _matched_dimensions_for_section(section: dict[str, Any], covered_dimensions: list[Any]) -> list[str]:
+    tags = _section_tags(section)
+    covered = {str(x).strip().lower() for x in covered_dimensions if str(x).strip()}
+    return sorted(covered.intersection(tags))
+
+
+def _synthesize_quantitative_update(
+    *,
+    section: dict[str, Any],
+    matches: list[dict[str, Any]],
+    matched_dimensions: list[str],
+    analysis: dict[str, Any],
+    update_ref: str,
+) -> str:
+    claim_summaries = [str(item.get("claim", "")).strip().rstrip(".") for item in matches if str(item.get("claim", "")).strip()]
+    if claim_summaries:
+        joined = "; ".join(claim_summaries[:3])
+        return f"Local evidence update from {update_ref}: {joined}."
+    summary = str(analysis.get("summary", "")).strip().rstrip(".")
+    if matched_dimensions and summary:
+        dims_text = ", ".join(matched_dimensions[:4])
+        return f"Local evidence update from {update_ref}: analyzer summary relevant to {dims_text}: {summary}."
+    return ""
+
+
+def _merge_text_block(existing: str, new_text: str) -> str:
+    existing = str(existing or "").strip()
+    new_text = str(new_text or "").strip()
+    if not new_text:
+        return existing
+    if not existing or existing == "No quantitative understanding recorded.":
+        return new_text
+    if new_text in existing:
+        return existing
+    return f"{existing} {new_text}".strip()
+
+
+def _question_answered_by_claims(question: str, matches: list[dict[str, Any]], matched_dimensions: list[str]) -> bool:
+    text = str(question).strip().lower()
+    if not text:
+        return False
+    claim_text = " ".join(str(item.get("claim", "")).strip().lower() for item in matches)
+    if any(dim in text for dim in matched_dimensions):
+        return True
+    for token in _question_tokens(text):
+        if token in claim_text:
+            return True
+    return False
+
+
+def _question_tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    for raw in str(text or "").replace("?", " ").replace(",", " ").split():
+        token = raw.strip(" .:;()[]`").lower().replace("-", "_")
+        if len(token) > 3:
+            tokens.append(token)
+    return tokens
+
+
+def _section_tags(section: dict[str, Any]) -> set[str]:
+    heading = str(section.get("section", "")).lower()
+    tags: set[str] = set()
+    if "global memory" in heading or "bandwidth" in heading:
+        tags.update({"dram_bandwidth", "global_memory", "memory_bandwidth", "sequential_load", "bandwidth"})
+    if "coalescing" in heading:
+        tags.update({"coalescing", "stride", "coalesced", "uncoalesced", "transaction_efficiency"})
+    if "l2" in heading or "cache" in heading:
+        tags.update({"l2", "l2_cache", "cache", "working_set", "cache_hit"})
+    if "register" in heading:
+        tags.update({"register", "register_pressure", "registers_per_thread"})
+    if "warp scheduling" in heading:
+        tags.update({"warp_scheduling", "scheduler", "eligible_warps", "issue"})
+    if "threads, warps, and thread blocks" in heading:
+        tags.update({"warp", "thread_block", "execution_model"})
+    if "roofline" in heading:
+        tags.update({"roofline", "bandwidth_ceiling", "compute_ceiling", "performance_model"})
+    tokens = [token.strip(".,:;()[]`") for token in heading.split()]
+    for token in tokens:
+        if len(token) > 2:
+            tags.add(token.replace("-", "_"))
+    return tags
 
 
 def _section_order_from_heading(heading: str) -> tuple[int, int]:
