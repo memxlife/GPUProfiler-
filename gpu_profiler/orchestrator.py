@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .agents import Agent, default_agents
+from .knowledge_base import initialize_markdown_knowledge_base
 from .llm import HeuristicWorkflowBackend, OpenAIWorkflowBackend, ResilientWorkflowBackend
 from .markdown_artifacts import (
     parse_analysis_markdown,
@@ -110,6 +111,7 @@ class Orchestrator:
                 "planner_notes": "Initialized local knowledge model.",
             }
             write_json(knowledge_model_path, initial_knowledge_model)
+            kb_files = initialize_markdown_knowledge_base(run_dir, intent)
             knowledge_base: dict[str, Any] = {
                 "intent": intent,
                 "target_dimensions": dimensions,
@@ -132,6 +134,7 @@ class Orchestrator:
                 "research_history": [],
                 "current_knowledge_model": initial_knowledge_model,
                 "knowledge_model_artifact": str(knowledge_model_path),
+                **kb_files,
             }
             kb_path = run_dir / "run_state.json"
             write_json(kb_path, knowledge_base)

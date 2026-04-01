@@ -1735,6 +1735,8 @@ def _compact_planner_kb(
         for item in pending_amendments[:4]
         if isinstance(item, dict)
     ]
+    knowledge_book_excerpt = _trim_text(kb.get("knowledge_base_book_memo", ""), 1600)
+    frontier_excerpt = _trim_text(kb.get("knowledge_base_frontier_memo", ""), 1200)
     return {
         "intent": _trim_text(kb.get("intent", ""), 160),
         "target_dimensions": target_dimensions,
@@ -1747,6 +1749,8 @@ def _compact_planner_kb(
         "history": compact_history,
         "research_history": compact_research,
         "pending_contract_amendments": compact_amendments,
+        "knowledge_base_book_excerpt": knowledge_book_excerpt,
+        "knowledge_base_frontier_excerpt": frontier_excerpt,
     }
 
 
@@ -1795,12 +1799,16 @@ def _render_planner_proposal_prompt(payload: dict[str, Any]) -> str:
     focus_nodes = ", ".join(str(x) for x in model.get("focus_nodes", []) if str(x).strip()) or "none yet"
     covered = ", ".join(str(x) for x in kb.get("covered_dimensions", []) if str(x).strip()) or "none yet"
     research_memo = str(payload.get("research_memo", "")).strip() or "No external findings yet."
+    frontier_memo = str(kb.get("knowledge_base_frontier_excerpt", "")).strip() or "No frontier memo recorded."
+    knowledge_book_excerpt = str(kb.get("knowledge_base_book_excerpt", "")).strip() or "No knowledge-base excerpt recorded."
     return (
         f"Intent: {payload.get('intent', '')}\n"
         f"Iteration: {payload.get('iteration', 0)} of {payload.get('max_iterations', 1)}\n"
         f"Available tools: {tools}\n"
         f"Current focus nodes: {focus_nodes}\n"
         f"Covered dimensions so far: {covered}\n\n"
+        f"Knowledge-base excerpt:\n{knowledge_book_excerpt}\n\n"
+        f"Frontier memo:\n{frontier_memo}\n\n"
         f"Research memo:\n{research_memo}\n\n"
         "Task: Propose the single best next benchmark proposal memo.\n"
         "Requirements:\n"

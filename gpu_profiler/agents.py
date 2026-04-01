@@ -21,6 +21,7 @@ from .llm import (
     CODEGEN_INPUT_HARD_CAP_CHARS,
     CODEGEN_INPUT_TARGET_CHARS,
 )
+from .knowledge_base import load_markdown_knowledge_base_memos, update_markdown_knowledge_base
 from .models import AgentContext, Task
 from .store import read_json, write_json, write_text
 
@@ -91,6 +92,7 @@ class LLMPlanningAgent(Agent):
         max_iterations = int(task.payload.get("max_iterations", 4))
         max_benchmarks = int(task.payload.get("max_benchmarks", 2))
         kb = task.payload.get("knowledge_base", {})
+        kb = {**kb, **load_markdown_knowledge_base_memos(kb)} if isinstance(kb, dict) else {}
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
         iter_dir.mkdir(parents=True, exist_ok=True)
         if task.kind == "llm_plan_research":
@@ -806,6 +808,20 @@ class LLMAnalysisAgent(Agent):
             }
         )
         write_json(knowledge_model_path, updated_model)
+        kb_files = update_markdown_knowledge_base(
+            ctx.run_dir,
+            intent=intent,
+            kb=kb,
+            knowledge_model=updated_model,
+            iteration=iteration,
+            analysis={
+                "summary": decision.summary,
+                "claims": decision.claims,
+                "covered_dimensions": covered,
+                "required_observability": decision.required_observability,
+            },
+        )
+        kb.update(kb_files)
         write_json(kb_path, kb)
 
         iter_dir = _iteration_dir(ctx.run_dir, iteration)
@@ -830,6 +846,8 @@ class LLMAnalysisAgent(Agent):
             "kb_artifact": str(kb_path),
             "knowledge_model_artifact": str(knowledge_model_path),
             "knowledge_model_iteration_artifact": str(iter_model_path),
+            "knowledge_base_index_artifact": kb.get("knowledge_base_index_artifact"),
+            "knowledge_base_frontier_artifact": kb.get("knowledge_base_frontier_artifact"),
         }
         write_json(analysis_path, out)
         write_text(analysis_md_path, _render_analysis_md(out))
@@ -923,7 +941,17 @@ class AutonomousReporterAgent(Agent):
             lines.append(
                 f"- iter {item.get('iteration')}: coverage={item.get('coverage_score')}, claims_added={item.get('claims_added')}, stop={item.get('stop')}"
             )
-        lines.extend(["", "## Claims", f"- total: `{len(model.get('claims', []))}`"])
+        lines.extend(
+            [
+                "",
+                "## Claims",
+                f"- total: `{len(model.get('claims', []))}`",
+                "",
+                "## Knowledge Base",
+                f"- index: `{model.get('knowledge_base_index_artifact', '')}`",
+                f"- frontier: `{model.get('knowledge_base_frontier_artifact', '')}`",
+            ]
+        )
         report_path = ctx.run_dir / "autonomous_report.md"
         write_text(report_path, "\n".join(lines))
         return {"artifact": str(report_path)}

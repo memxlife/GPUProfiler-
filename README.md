@@ -46,6 +46,7 @@ python gpu_autoprofile.py autonomous \
 
 Autonomous artifacts include:
 - `run_state.json` (operational run ledger, coverage state, and accumulated claim index)
+- `knowledge_base/` (markdown textbook-style knowledge base, frontier, and local findings)
 - `autonomous_report.md`
 - `iterations/iter_XX/knowledge_model.json` (planner-owned knowledge hierarchy)
 - `iterations/iter_XX/proposal.json` and `proposal.md` (planner-owned non-executable proposal)
