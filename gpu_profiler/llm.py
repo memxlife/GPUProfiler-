@@ -1757,6 +1757,11 @@ def _compact_planner_kb(
     ]
     knowledge_book_excerpt = _trim_text(kb.get("knowledge_base_book_memo", ""), 1600)
     frontier_excerpt = _trim_text(kb.get("knowledge_base_frontier_memo", ""), 1200)
+    frontier_questions = [
+        _trim_text(item, 220)
+        for item in (kb.get("knowledge_base_frontier_questions", []) if isinstance(kb.get("knowledge_base_frontier_questions", []), list) else [])
+        if str(item).strip()
+    ][:8]
     return {
         "intent": _trim_text(kb.get("intent", ""), 160),
         "target_dimensions": target_dimensions,
@@ -1771,6 +1776,7 @@ def _compact_planner_kb(
         "pending_contract_amendments": compact_amendments,
         "knowledge_base_book_excerpt": knowledge_book_excerpt,
         "knowledge_base_frontier_excerpt": frontier_excerpt,
+        "knowledge_base_frontier_questions": frontier_questions,
     }
 
 
@@ -1813,6 +1819,12 @@ def _compact_research_request(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def _next_frontier_question(kb: dict[str, Any], focus_dimensions: list[str]) -> str:
+    explicit_questions = kb.get("knowledge_base_frontier_questions", [])
+    if isinstance(explicit_questions, list):
+        for item in explicit_questions:
+            text = str(item).strip()
+            if text:
+                return text
     frontier = str(kb.get("knowledge_base_frontier_memo", "") or kb.get("knowledge_base_frontier_excerpt", "")).strip()
     for raw_line in frontier.splitlines():
         line = raw_line.strip()
@@ -1845,6 +1857,7 @@ def _render_planner_proposal_prompt(payload: dict[str, Any]) -> str:
     research_memo = str(payload.get("research_memo", "")).strip() or "No external findings yet."
     frontier_memo = str(kb.get("knowledge_base_frontier_excerpt", "")).strip() or "No frontier memo recorded."
     knowledge_book_excerpt = str(kb.get("knowledge_base_book_excerpt", "")).strip() or "No knowledge-base excerpt recorded."
+    frontier_questions = "\n".join(f"- {item}" for item in kb.get("knowledge_base_frontier_questions", []) if str(item).strip()) or "- none recorded"
     return (
         f"Intent: {payload.get('intent', '')}\n"
         f"Iteration: {payload.get('iteration', 0)} of {payload.get('max_iterations', 1)}\n"
@@ -1853,6 +1866,7 @@ def _render_planner_proposal_prompt(payload: dict[str, Any]) -> str:
         f"Covered dimensions so far: {covered}\n\n"
         f"Knowledge-base excerpt:\n{knowledge_book_excerpt}\n\n"
         f"Frontier memo:\n{frontier_memo}\n\n"
+        f"Frontier questions:\n{frontier_questions}\n\n"
         f"Selected question:\n{question_memo}\n\n"
         f"Research memo:\n{research_memo}\n\n"
         "Task: Propose the single best next benchmark proposal memo that directly answers the selected question.\n"

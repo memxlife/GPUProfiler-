@@ -69,10 +69,40 @@ def update_markdown_knowledge_base(
 def load_markdown_knowledge_base_memos(kb: dict[str, Any]) -> dict[str, str]:
     index_path = str(kb.get("knowledge_base_index_artifact", "")).strip()
     frontier_path = str(kb.get("knowledge_base_frontier_artifact", "")).strip()
+    chapter_paths = [
+        str(kb.get("knowledge_base_foundations_artifact", "")).strip(),
+        str(kb.get("knowledge_base_memory_artifact", "")).strip(),
+        str(kb.get("knowledge_base_resources_artifact", "")).strip(),
+        str(kb.get("knowledge_base_modeling_artifact", "")).strip(),
+    ]
+    chapter_texts = [_read_text(path) for path in chapter_paths if path]
+    frontier_questions = extract_frontier_questions(kb)
     return {
-        "knowledge_base_book_memo": _read_text(index_path),
+        "knowledge_base_book_memo": "\n\n".join(part for part in [_read_text(index_path), *chapter_texts] if part),
         "knowledge_base_frontier_memo": _read_text(frontier_path),
+        "knowledge_base_frontier_questions": frontier_questions,
     }
+
+
+def extract_frontier_questions(kb: dict[str, Any]) -> list[str]:
+    questions: list[str] = []
+    frontier_path = str(kb.get("knowledge_base_frontier_artifact", "")).strip()
+    for item in _parse_frontier_markdown(_read_text(frontier_path)):
+        if item not in questions:
+            questions.append(item)
+    for artifact_key in (
+        "knowledge_base_foundations_artifact",
+        "knowledge_base_memory_artifact",
+        "knowledge_base_resources_artifact",
+        "knowledge_base_modeling_artifact",
+    ):
+        path_text = str(kb.get(artifact_key, "")).strip()
+        if not path_text:
+            continue
+        for item in _parse_open_questions_from_chapter(_read_text(path_text)):
+            if item not in questions:
+                questions.append(item)
+    return questions[:16]
 
 
 def _write_if_missing(path: Path, text: str) -> None:
@@ -234,6 +264,48 @@ def _frontier_questions(kb: dict[str, Any], knowledge_model: dict[str, Any], ana
             if question not in questions:
                 questions.append(question)
     return questions[:12]
+
+
+def _parse_frontier_markdown(text: str) -> list[str]:
+    questions: list[str] = []
+    in_frontier = False
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if line == "## Active Frontier Questions":
+            in_frontier = True
+            continue
+        if in_frontier and line.startswith("## "):
+            break
+        if not in_frontier:
+            continue
+        if line and line[0].isdigit() and ". " in line:
+            questions.append(line.split(". ", 1)[1].strip())
+    return questions
+
+
+def _parse_open_questions_from_chapter(text: str) -> list[str]:
+    questions: list[str] = []
+    current_section = ""
+    in_open_questions = False
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if stripped.startswith("#### "):
+            current_section = stripped[5:].strip()
+            in_open_questions = False
+            continue
+        if stripped == "Open Questions":
+            in_open_questions = True
+            continue
+        if in_open_questions and stripped in {"Cross References", "Status", "Evidence", "Summary", "Mechanism", "Quantitative Understanding"}:
+            in_open_questions = False
+        if not in_open_questions:
+            continue
+        if stripped.startswith("- "):
+            question = stripped[2:].strip()
+            if question:
+                questions.append(f"{current_section}: {question}" if current_section else question)
+    return questions
 
 
 def _initial_findings_md() -> str:
