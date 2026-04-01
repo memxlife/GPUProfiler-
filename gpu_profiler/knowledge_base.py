@@ -92,6 +92,7 @@ def extract_frontier_questions(kb: dict[str, Any]) -> list[str]:
 
 def extract_frontier_candidates(kb: dict[str, Any]) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
+    section_index: dict[str, dict[str, Any]] = {}
     frontier_path = str(kb.get("knowledge_base_frontier_artifact", "")).strip()
     candidates.extend(_parse_frontier_markdown(_read_text(frontier_path)))
     for artifact_key in (
@@ -103,7 +104,28 @@ def extract_frontier_candidates(kb: dict[str, Any]) -> list[dict[str, Any]]:
         path_text = str(kb.get(artifact_key, "")).strip()
         if not path_text:
             continue
+        chapter_sections = _parse_chapter_sections(_read_text(path_text))
+        for section in chapter_sections:
+            section_name = str(section.get("section", "")).strip()
+            if section_name:
+                section_index[section_name] = section
         candidates.extend(_parse_open_questions_from_chapter(_read_text(path_text)))
+    for item in candidates:
+        refs = [str(ref).strip() for ref in item.get("section_refs", []) if str(ref).strip()]
+        section_meta = None
+        for ref in refs:
+            if ref in section_index:
+                section_meta = section_index[ref]
+                break
+        if section_meta is None:
+            continue
+        item["status"] = section_meta.get("status", "")
+        item["prerequisites"] = section_meta.get("prerequisites", [])
+        item["frontier_criteria"] = section_meta.get("frontier_criteria", [])
+        item["unsatisfied_prerequisites"] = _unsatisfied_prerequisites(
+            section_meta.get("prerequisites", []),
+            section_index,
+        )
     deduped: dict[str, dict[str, Any]] = {}
     for item in candidates:
         question = str(item.get("question", "")).strip()
@@ -315,40 +337,87 @@ def _parse_frontier_markdown(text: str) -> list[dict[str, Any]]:
 
 def _parse_open_questions_from_chapter(text: str) -> list[dict[str, Any]]:
     questions: list[dict[str, Any]] = []
-    current_section = ""
-    current_order: tuple[int, int] = (999, 999)
-    in_open_questions = False
-    local_rank = 0
-    for raw_line in str(text or "").splitlines():
-        line = raw_line.rstrip()
-        stripped = line.strip()
-        if stripped.startswith("#### "):
-            current_section = stripped[5:].strip()
-            current_order = _section_order_from_heading(current_section)
-            in_open_questions = False
-            local_rank = 0
+    for section in _parse_chapter_sections(text):
+        status = str(section.get("status", "")).strip().lower()
+        if status not in {"frontier", "unknown"}:
             continue
-        if stripped == "Open Questions":
-            in_open_questions = True
-            continue
-        if in_open_questions and stripped in {"Cross References", "Status", "Evidence", "Summary", "Mechanism", "Quantitative Understanding"}:
-            in_open_questions = False
-        if not in_open_questions:
-            continue
-        if stripped.startswith("- "):
-            question = stripped[2:].strip()
+        for index, question in enumerate(section.get("open_questions", [])):
+            question = str(question).strip()
             if question:
                 questions.append(
                     {
-                        "question": f"{current_section}: {question}" if current_section else question,
+                        "question": f"{section.get('section')}: {question}" if section.get("section") else question,
                         "source": "chapter",
-                        "section_refs": [current_section] if current_section else [],
-                        "frontier_rank": local_rank,
-                        "section_order": current_order,
+                        "section_refs": [section.get("section")] if section.get("section") else [],
+                        "frontier_rank": index,
+                        "section_order": section.get("section_order", (999, 999)),
+                        "status": section.get("status", ""),
+                        "prerequisites": section.get("prerequisites", []),
+                        "frontier_criteria": section.get("frontier_criteria", []),
                     }
                 )
-                local_rank += 1
     return questions
+
+
+def _parse_chapter_sections(text: str) -> list[dict[str, Any]]:
+    sections: list[dict[str, Any]] = []
+    current_heading = ""
+    current_lines: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("#### "):
+            if current_heading:
+                sections.append(_parse_section_block(current_heading, current_lines))
+            current_heading = stripped[5:].strip()
+            current_lines = []
+            continue
+        if current_heading:
+            current_lines.append(raw_line)
+    if current_heading:
+        sections.append(_parse_section_block(current_heading, current_lines))
+    return sections
+
+
+def _parse_section_block(heading: str, lines: list[str]) -> dict[str, Any]:
+    parsed: dict[str, Any] = {
+        "section": heading,
+        "section_order": _section_order_from_heading(heading),
+        "status": "",
+        "open_questions": [],
+        "prerequisites": [],
+        "frontier_criteria": [],
+    }
+    current_field = ""
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if stripped in {
+            "Summary",
+            "Mechanism",
+            "Quantitative Understanding",
+            "Evidence",
+            "Open Questions",
+            "Cross References",
+            "Status",
+            "Prerequisites",
+            "Frontier Criteria",
+        }:
+            current_field = stripped
+            continue
+        if not current_field:
+            continue
+        if current_field in {"Open Questions", "Prerequisites", "Frontier Criteria"} and stripped.startswith("- "):
+            item = stripped[2:].strip()
+            if item:
+                key = {
+                    "Open Questions": "open_questions",
+                    "Prerequisites": "prerequisites",
+                    "Frontier Criteria": "frontier_criteria",
+                }[current_field]
+                parsed[key].append(item)
+            continue
+        if current_field == "Status" and stripped:
+            parsed["status"] = stripped
+    return parsed
 
 
 def _section_order_from_heading(heading: str) -> tuple[int, int]:
@@ -380,7 +449,22 @@ def _candidate_sort_key(item: dict[str, Any]) -> tuple[int, int, int, int]:
     if not isinstance(section_order, tuple) or len(section_order) != 2:
         section_order = (999, 999)
     frontier_rank = int(item.get("frontier_rank", 999))
-    return (section_order[0], section_order[1], source_priority, frontier_rank)
+    unsatisfied = item.get("unsatisfied_prerequisites", [])
+    unsatisfied_count = len(unsatisfied) if isinstance(unsatisfied, list) else 999
+    return (unsatisfied_count, section_order[0], section_order[1], source_priority, frontier_rank)
+
+
+def _unsatisfied_prerequisites(prerequisites: list[Any], section_index: dict[str, dict[str, Any]]) -> list[str]:
+    missing: list[str] = []
+    for item in prerequisites if isinstance(prerequisites, list) else []:
+        text = str(item).strip()
+        if not text:
+            continue
+        section = section_index.get(text)
+        status = str((section or {}).get("status", "")).strip().lower()
+        if status != "known":
+            missing.append(text)
+    return missing
 
 
 def _initial_findings_md() -> str:
@@ -414,7 +498,13 @@ Cross References
 - [2.1 Global Memory Access]
 
 Status  
-Frontier
+Known
+
+Prerequisites  
+- None
+
+Frontier Criteria  
+- Maintain consistency with later locally validated execution evidence
 """
 
 
@@ -447,6 +537,13 @@ Cross References
 Status  
 Frontier
 
+Prerequisites  
+- 1.1 Threads, Warps, and Thread Blocks
+
+Frontier Criteria  
+- A bounded local benchmark produces a trustworthy sustained bandwidth estimate
+- The benchmark conditions are documented clearly enough for reuse
+
 #### 2.2 Coalescing
 
 Summary  
@@ -471,6 +568,13 @@ Cross References
 Status  
 Frontier
 
+Prerequisites  
+- 2.1 Global Memory Access
+
+Frontier Criteria  
+- A stride-controlled benchmark shows how throughput changes with access pattern
+- The observed trend is stable enough to describe quantitatively
+
 #### 2.3 L2 Cache
 
 Summary  
@@ -494,6 +598,13 @@ Cross References
 
 Status  
 Frontier
+
+Prerequisites  
+- 2.1 Global Memory Access
+
+Frontier Criteria  
+- A working-set sweep identifies a credible cache-to-DRAM transition regime
+- The transition can be expressed with clear conditions
 """
 
 
@@ -525,6 +636,13 @@ Cross References
 
 Status  
 Frontier
+
+Prerequisites  
+- 1.1 Threads, Warps, and Thread Blocks
+
+Frontier Criteria  
+- A controlled benchmark or analysis isolates register-pressure effects on occupancy or throughput
+- The resulting dependence can be stated more precisely than general prior knowledge
 """
 
 
@@ -556,4 +674,12 @@ Cross References
 
 Status  
 Frontier
+
+Prerequisites  
+- 2.1 Global Memory Access
+- 2.2 Coalescing
+
+Frontier Criteria  
+- At least one trustworthy local bandwidth ceiling is established
+- The relationship between the ceiling and kernel observations is interpretable quantitatively
 """

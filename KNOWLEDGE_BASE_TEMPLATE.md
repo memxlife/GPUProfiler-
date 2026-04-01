@@ -59,6 +59,12 @@ Cross References
 
 Status  
 Known | Frontier | Unknown | Contradicted
+
+Prerequisites  
+- lower-level section required before this section can advance confidently
+
+Frontier Criteria  
+- evidence condition required to move this section upward
 ```
 
 ## Writing Rules
@@ -93,6 +99,14 @@ Status:
 - `Frontier` means partially understood or awaiting decisive local evidence
 - `Unknown` means recognized but not yet characterized
 - `Contradicted` means prior understanding has been challenged by evidence
+
+Prerequisites:
+- list the lower-level sections that should already be sufficiently known
+- planner ranking should prefer frontier questions whose prerequisites are already satisfied
+
+Frontier Criteria:
+- state what evidence would justify moving the section from frontier toward known
+- analyzer should use these criteria when deciding whether the frontier advanced
 
 ## Frontier Summary
 

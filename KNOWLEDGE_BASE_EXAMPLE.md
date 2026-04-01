@@ -35,6 +35,12 @@ Cross References
 Status  
 Frontier
 
+Prerequisites  
+- None
+
+Frontier Criteria  
+- Maintain consistency with later locally validated execution evidence
+
 #### 1.2 Warp Scheduling
 
 Summary  
@@ -62,6 +68,13 @@ Cross References
 Status  
 Frontier
 
+Prerequisites  
+- 1.1 Threads, Warps, and Thread Blocks
+
+Frontier Criteria  
+- A local benchmark isolates warp-level scheduling or eligibility effects
+- The resulting evidence supports a precise update to this section
+
 #### 1.3 Occupancy and Latency Hiding
 
 Summary  
@@ -88,6 +101,14 @@ Cross References
 
 Status  
 Frontier
+
+Prerequisites  
+- 1.1 Threads, Warps, and Thread Blocks
+- 1.2 Warp Scheduling
+
+Frontier Criteria  
+- A local occupancy-oriented benchmark establishes when additional warps stop improving throughput
+- The resulting limit can be stated with clear conditions
 
 ## Part II. Memory System
 
@@ -119,6 +140,13 @@ Cross References
 Status  
 Frontier
 
+Prerequisites  
+- 1.1 Threads, Warps, and Thread Blocks
+
+Frontier Criteria  
+- A bounded local benchmark produces a trustworthy sustained bandwidth estimate
+- The benchmark conditions are documented clearly enough for reuse
+
 #### 2.2 Coalescing
 
 Summary  
@@ -146,6 +174,13 @@ Cross References
 Status  
 Frontier
 
+Prerequisites  
+- 2.1 Global Memory Access
+
+Frontier Criteria  
+- A stride-controlled benchmark shows how throughput changes with access pattern
+- The observed trend is stable enough to describe quantitatively
+
 #### 2.3 L2 Cache
 
 Summary  
@@ -171,6 +206,13 @@ Cross References
 
 Status  
 Frontier
+
+Prerequisites  
+- 2.1 Global Memory Access
+
+Frontier Criteria  
+- A working-set sweep identifies a credible cache-to-DRAM transition regime
+- The transition can be expressed with clear conditions
 
 ## Part III. Resource Constraints
 
@@ -202,6 +244,13 @@ Cross References
 Status  
 Frontier
 
+Prerequisites  
+- 1.3 Occupancy and Latency Hiding
+
+Frontier Criteria  
+- A controlled benchmark or analysis isolates register-pressure effects on occupancy or throughput
+- The resulting dependence can be stated more precisely than general prior knowledge
+
 ## Part IV. Quantitative Performance Modeling
 
 ### Chapter 4. Performance Limits and Interpretation
@@ -231,6 +280,14 @@ Cross References
 
 Status  
 Frontier
+
+Prerequisites  
+- 2.1 Global Memory Access
+- 2.2 Coalescing
+
+Frontier Criteria  
+- At least one trustworthy local bandwidth ceiling is established
+- The relationship between the ceiling and kernel observations is interpretable quantitatively
 
 ## Frontier Summary
 
