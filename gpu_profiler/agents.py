@@ -111,12 +111,9 @@ class LLMPlanningAgent(Agent):
                 "current_question": decision.current_question,
                 "research_request": decision.research_request,
             }
-            question_md_path = iter_dir / "question.md"
             research_request_path = iter_dir / "research_request.json"
             research_request_md_path = iter_dir / "research_request.md"
             research_request_raw_path = iter_dir / "research_request_raw.md"
-            write_text(question_md_path, _render_question_md(result))
-            result["question_artifact"] = str(question_md_path)
             if isinstance(decision.research_request, dict):
                 write_json(research_request_path, decision.research_request)
                 write_text(research_request_md_path, _render_research_request_md(result))
@@ -134,7 +131,7 @@ class LLMPlanningAgent(Agent):
 
         if task.kind == "llm_plan_proposal":
             research_memo = _read_text_artifact(task.payload.get("research_artifact_md"))
-            question_memo = _read_text_artifact(task.payload.get("question_artifact"))
+            question_memo = str(task.payload.get("current_question", "")).strip()
             decision = self.workflow_backend.plan_proposal(
                 intent=intent,
                 kb=kb,
@@ -152,7 +149,6 @@ class LLMPlanningAgent(Agent):
                 "current_question": decision.current_question,
                 "proposal": decision.proposal,
                 "knowledge_model_artifact": task.payload.get("knowledge_model_artifact"),
-                "question_artifact": task.payload.get("question_artifact"),
             }
             proposal_path = iter_dir / "proposal.json"
             proposal_md_path = iter_dir / "proposal.md"
@@ -186,12 +182,10 @@ class LLMPlanningAgent(Agent):
         model_path = iter_dir / "knowledge_model.json"
         proposal_path = iter_dir / "proposal.json"
         proposal_md_path = iter_dir / "proposal.md"
-        question_md_path = iter_dir / "question.md"
         research_request_path = iter_dir / "research_request.json"
         research_request_md_path = iter_dir / "research_request.md"
         write_json(model_path, decision.knowledge_model)
         write_json(proposal_path, decision.proposal)
-        write_text(question_md_path, _render_question_md(plan))
         write_text(proposal_md_path, _render_proposal_md(plan))
         if isinstance(decision.research_request, dict):
             write_json(research_request_path, decision.research_request)
@@ -202,7 +196,6 @@ class LLMPlanningAgent(Agent):
             plan["research_request_artifact"] = None
             plan["research_request_meta_artifact"] = None
         plan["knowledge_model_artifact"] = str(model_path)
-        plan["question_artifact"] = str(question_md_path)
         plan["proposal_artifact"] = str(proposal_path)
         plan["proposal_md_artifact"] = str(proposal_md_path)
         return plan
@@ -1365,23 +1358,6 @@ def _render_research_request_md(result: dict[str, Any]) -> str:
     for item in request.get("expected_outputs", []):
         lines.append(f"- {item}")
     return "\n".join(lines)
-
-
-def _render_question_md(result: dict[str, Any]) -> str:
-    return "\n".join(
-        [
-            f"# Iteration {result.get('iteration')} Question",
-            "",
-            "## Current Question",
-            str(result.get("current_question", "")).strip() or "No current question recorded.",
-            "",
-            "## Why This Question Matters",
-            str(result.get("reason", "")).strip() or "No explicit rationale recorded.",
-            "",
-            "## Frontier Source",
-            "This question should be understood as the next bottom-up step selected from the current knowledge-base frontier.",
-        ]
-    )
 
 
 def _empty_knowledge_model(intent: str) -> dict[str, Any]:

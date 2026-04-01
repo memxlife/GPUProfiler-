@@ -209,7 +209,7 @@ class Orchestrator:
                             if isinstance(knowledge_base.get("latest_research", {}), dict)
                             else {}
                         ).get("artifact_md"),
-                        "question_artifact": research_plan.get("question_artifact"),
+                        "current_question": research_plan.get("current_question"),
                     },
                 )
                 completed.append(self._run_with_retry(proposal_task, ctx))
@@ -434,7 +434,6 @@ class Orchestrator:
                 "planner": result.get("planner"),
                 "reason": result.get("reason"),
                 "current_question": result.get("current_question"),
-                "question_artifact": result.get("question_artifact"),
                 "research_request_artifact": result.get("research_request_artifact"),
                 "research_request_meta_artifact": result.get("research_request_meta_artifact"),
                 "research_request": research_request,
@@ -456,7 +455,6 @@ class Orchestrator:
                 "planner": plan.get("planner"),
                 "reason": plan.get("reason"),
                 "current_question": plan.get("current_question"),
-                "question_artifact": plan.get("question_artifact"),
                 "artifact": plan.get("proposal_artifact"),
                 "artifact_md": plan.get("proposal_md_artifact"),
                 "proposal": proposal if isinstance(proposal, dict) else {},
@@ -797,11 +795,11 @@ class Orchestrator:
 
     def _conversation_artifact_keys_for_task(self, task_kind: str) -> list[tuple[str, str]]:
         if task_kind == "llm_plan_research":
-            return [("Current question", "question_artifact"), ("Research request", "research_request_artifact")]
+            return [("Research request", "research_request_artifact")]
         if task_kind == "llm_research":
             return [("Research notes", "artifact_md")]
         if task_kind == "llm_plan_proposal":
-            return [("Current question", "question_artifact"), ("Proposal", "proposal_md_artifact")]
+            return [("Proposal", "proposal_md_artifact")]
         if task_kind == "llm_generate_implementation":
             return [
                 ("Prompt I used", "prompt_artifact"),
@@ -947,14 +945,13 @@ class Orchestrator:
             return [("schema-contract", "artifact_md"), ("schema-contract-json", "artifact")]
         if task_kind == "llm_plan_research":
             return [
-                ("question", "question_artifact"),
                 ("research-request-raw", "research_request_raw_artifact"),
                 ("research-request", "research_request_artifact"),
             ]
         if task_kind == "llm_research":
             return [("research-raw", "raw_artifact"), ("research-memo", "artifact_md")]
         if task_kind == "llm_plan_proposal":
-            return [("question", "question_artifact"), ("proposal-raw", "proposal_raw_artifact"), ("proposal-memo", "proposal_md_artifact")]
+            return [("proposal-raw", "proposal_raw_artifact"), ("proposal-memo", "proposal_md_artifact")]
         if task_kind == "llm_generate_implementation":
             return [
                 ("implementation-prompt", "prompt_artifact"),
