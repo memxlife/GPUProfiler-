@@ -46,7 +46,7 @@ class ResearchRequestPlanDecision:
 @dataclass
 class BenchmarkPlanDecision:
     reason: str
-    proposal: dict[str, Any]
+    benchmark_plan: dict[str, Any]
     planner: str
     current_question: str = ""
     raw_response: str = ""
@@ -56,7 +56,7 @@ class BenchmarkPlanDecision:
 class PlanDecision:
     reason: str
     knowledge_model: dict[str, Any]
-    proposal: dict[str, Any]
+    benchmark_plan: dict[str, Any]
     research_request: dict[str, Any] | None
     current_question: str
     planner: str
@@ -164,7 +164,7 @@ class LLMWorkflowBackend:
         plan: dict[str, Any],
         iteration: int,
         max_benchmarks: int,
-        proposal_memo: str = "",
+        planning_memo: str = "",
     ) -> ImplementationDecision:
         raise NotImplementedError
 
@@ -222,13 +222,13 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
                         "observability_score": 0.3,
                     },
                     "max_amendment_rounds": 2,
-                    "amendment_policy": "Reject below-threshold proposals, keep rationale, and request revised implementation.",
+                    "amendment_policy": "Reject below-threshold benchmark plans, keep rationale, and request revised implementation.",
                 },
                 "research_request_output": {
                     "required_keys": ["reason", "research_request"],
                 },
-                "proposal_output": {
-                    "required_keys": ["reason", "proposal"],
+                "benchmark_plan_output": {
+                    "required_keys": ["reason", "benchmark_plan"],
                 },
                 "implementation_output": {
                     "required_keys": ["reason", "benchmarks"],
@@ -287,11 +287,11 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
         max_benchmarks: int,
     ) -> PlanDecision:
         research = self.plan_research_request(intent, kb, iteration, max_iterations, max_benchmarks)
-        proposal = self.plan_benchmark(intent, kb, iteration, max_iterations, max_benchmarks)
+        benchmark_plan = self.plan_benchmark(intent, kb, iteration, max_iterations, max_benchmarks)
         return PlanDecision(
-            reason=proposal.reason,
+            reason=benchmark_plan.reason,
             knowledge_model=_current_or_default_knowledge_model(kb=kb, intent=intent),
-            proposal=proposal.proposal,
+            benchmark_plan=benchmark_plan.benchmark_plan,
             research_request=research.research_request,
             current_question=research.current_question,
             planner=self.name,
@@ -336,7 +336,7 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
         focus = _planner_focus_dimensions_from_kb(kb=kb, iteration=iteration, max_benchmarks=max_benchmarks)
         return BenchmarkPlanDecision(
             reason="Fallback planner produced generic plan items.",
-            proposal=_default_proposal(intent=intent, focus_dimensions=focus, iteration=iteration),
+            benchmark_plan=_default_benchmark_plan(intent=intent, focus_dimensions=focus, iteration=iteration),
             current_question=_question_text_from_memo(question_memo) or _next_frontier_question(kb=kb, focus_dimensions=focus),
             planner=self.name,
             raw_response="",
@@ -349,10 +349,10 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
         plan: dict[str, Any],
         iteration: int,
         max_benchmarks: int,
-        proposal_memo: str = "",
+        planning_memo: str = "",
     ) -> ImplementationDecision:
-        _ = (intent, kb, proposal_memo)
-        focus = _proposal_focus_nodes(plan.get("proposal", {}))[: max(1, max_benchmarks)]
+        _ = (intent, kb, planning_memo)
+        focus = _benchmark_plan_focus_nodes(plan.get("benchmark_plan", {}))[: max(1, max_benchmarks)]
         benchmarks = []
         for idx, dim in enumerate(focus or [f"dimension_{iteration + 1}"]):
             benchmarks.append(
@@ -493,7 +493,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                         "amendment_policy": "str",
                     },
                     "research_request_output": {"required_keys": ["str"]},
-                    "proposal_output": {"required_keys": ["str"]},
+                    "benchmark_plan_output": {"required_keys": ["str"]},
                     "implementation_output": {"required_keys": ["str"], "benchmark_required_keys": ["str"]},
                     "analysis_output": {"required_keys": ["str"]},
                 },
@@ -604,11 +604,11 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         max_benchmarks: int,
     ) -> PlanDecision:
         research = self.plan_research_request(intent, kb, iteration, max_iterations, max_benchmarks)
-        proposal = self.plan_benchmark(intent, kb, iteration, max_iterations, max_benchmarks)
+        benchmark_plan = self.plan_benchmark(intent, kb, iteration, max_iterations, max_benchmarks)
         return PlanDecision(
-            reason=proposal.reason,
+            reason=benchmark_plan.reason,
             knowledge_model=_current_or_default_knowledge_model(kb=kb, intent=intent),
-            proposal=proposal.proposal,
+            benchmark_plan=benchmark_plan.benchmark_plan,
             research_request=research.research_request,
             current_question=research.current_question,
             planner=self.name,
@@ -659,7 +659,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         out = self._json_completion(
             system=(
                 "You are a planner agent deciding only whether external research is needed next. "
-                "Return strict JSON only. Do not generate proposals, executable code, commands, or profiler invocations."
+                "Return strict JSON only. Do not generate benchmark plans, executable code, commands, or profiler invocations."
             ),
             user=payload,
             context="plan-research-request",
@@ -668,7 +668,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         research_request = _sanitize_research_request(
             out.get("research_request", {}),
             intent=intent,
-            proposal={"target_nodes": _planner_focus_dimensions_from_kb(kb=kb, iteration=iteration, max_benchmarks=max_benchmarks)},
+            benchmark_plan={"target_nodes": _planner_focus_dimensions_from_kb(kb=kb, iteration=iteration, max_benchmarks=max_benchmarks)},
         )
         return ResearchRequestPlanDecision(
             reason=str(out.get("reason", "")).strip(),
@@ -713,7 +713,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             hard_cap_chars=PLANNER_INPUT_HARD_CAP_CHARS,
             trimmers=[_trim_planner_payload],
         )
-        user_prompt = _render_planner_proposal_prompt(payload)
+        user_prompt = _render_planner_benchmark_prompt(payload)
         memo = self._text_completion(
             system=(
                 "You are a GPU performance-model planner. Answer briefly and directly in plain Markdown. "
@@ -723,19 +723,19 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             context="planner-benchmark",
             timeout_sec=PLANNER_REQUEST_TIMEOUT_SEC,
         )
-        proposal = _proposal_from_memo(
+        benchmark_plan = _benchmark_plan_from_memo(
             memo,
             intent=intent,
             focus_nodes=_planner_focus_dimensions_from_kb(kb=kb, iteration=iteration, max_benchmarks=max_benchmarks),
             iteration=iteration,
         )
-        focus = _sanitize_dimensions(_proposal_focus_nodes(proposal), [], max_benchmarks)
+        focus = _sanitize_dimensions(_benchmark_plan_focus_nodes(benchmark_plan), [], max_benchmarks)
         if not focus:
             focus = _planner_focus_dimensions_from_kb(kb=kb, iteration=iteration, max_benchmarks=max_benchmarks)
-        proposal = _sanitize_proposal(proposal, intent=intent, focus_nodes=focus, iteration=iteration)
+        benchmark_plan = _sanitize_benchmark_plan(benchmark_plan, intent=intent, focus_nodes=focus, iteration=iteration)
         return BenchmarkPlanDecision(
-            reason=_proposal_reason_from_memo(memo),
-            proposal=proposal,
+            reason=_benchmark_plan_reason_from_memo(memo),
+            benchmark_plan=benchmark_plan,
             current_question=_question_text_from_memo(question_memo) or _next_frontier_question(kb=kb, focus_dimensions=focus),
             planner=self.name,
             raw_response=memo,
@@ -748,9 +748,9 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         plan: dict[str, Any],
         iteration: int,
         max_benchmarks: int,
-        proposal_memo: str = "",
+        planning_memo: str = "",
     ) -> ImplementationDecision:
-        focus = _proposal_focus_nodes(plan.get("proposal", {}))
+        focus = _benchmark_plan_focus_nodes(plan.get("benchmark_plan", {}))
         if not focus:
             focus = [f"dimension_{iteration + 1}"]
         focus = focus[: max(1, max_benchmarks)]
@@ -767,7 +767,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                 "plan": compact_plan,
                 "iteration": iteration,
                 "dimension": dim,
-                "proposal_memo": _trim_text(proposal_memo, 3000),
+                "planning_memo": _trim_text(planning_memo, 3000),
                 "constraints": {
                     "bounded_runtime": "Each command should complete in <= 45 seconds when possible.",
                     "safety": "No destructive commands, no system configuration mutation.",
@@ -786,7 +786,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                 dimension=dim,
                 iteration=iteration,
                 benchmark_index=len(benchmarks_raw),
-                proposal=compact_plan.get("proposal", {}),
+                benchmark_plan=compact_plan.get("benchmark_plan", {}),
                 user_prompt=user_prompt,
             )
             raw_memos.append(memo)
@@ -801,7 +801,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             target_dimensions=kb.get("target_dimensions", []),
             max_benchmarks=max_benchmarks,
             planner_name=self.name,
-            focus_dimensions=_proposal_focus_nodes(plan.get("proposal", {})),
+            focus_dimensions=_benchmark_plan_focus_nodes(plan.get("benchmark_plan", {})),
             contract=kb.get("schema_contract", {}),
         )
         return ImplementationDecision(
@@ -820,7 +820,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         dimension: str,
         iteration: int,
         benchmark_index: int,
-        proposal: dict[str, Any],
+        benchmark_plan: dict[str, Any],
         user_prompt: str,
     ) -> tuple[str, dict[str, Any], list[dict[str, Any]], bool]:
         memo = self._text_completion(
@@ -836,7 +836,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             dimension=dimension,
             iteration=iteration,
             benchmark_index=benchmark_index,
-            proposal=proposal,
+            benchmark_plan=benchmark_plan,
         )
         repair_used = False
         for _ in range(CODEGEN_REPAIR_ATTEMPTS):
@@ -865,7 +865,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
                 dimension=dimension,
                 iteration=iteration,
                 benchmark_index=benchmark_index,
-                proposal=proposal,
+                benchmark_plan=benchmark_plan,
             )
         return memo, bench, amendments, repair_used
 
@@ -1190,12 +1190,12 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
         plan: dict[str, Any],
         iteration: int,
         max_benchmarks: int,
-        proposal_memo: str = "",
+        planning_memo: str = "",
     ) -> ImplementationDecision:
         try:
-            return self._call_primary("generate_implementation", intent, kb, plan, iteration, max_benchmarks, proposal_memo)
+            return self._call_primary("generate_implementation", intent, kb, plan, iteration, max_benchmarks, planning_memo)
         except Exception as exc:  # noqa: BLE001
-            alt = self.fallback.generate_implementation(intent, kb, plan, iteration, max_benchmarks, proposal_memo)
+            alt = self.fallback.generate_implementation(intent, kb, plan, iteration, max_benchmarks, planning_memo)
             alt.reason = f"Primary implementation generation failed ({exc}); fallback used. {alt.reason}"
             alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
             return alt
@@ -1524,11 +1524,17 @@ def _timeout_diagnostic_payload(method_name: str, args: tuple[Any, ...]) -> dict
     if method_name == "generate_implementation":
         payload["intent"] = str(args[0]).strip() if args else ""
         plan = args[2] if len(args) > 2 and isinstance(args[2], dict) else {}
-        proposal = plan.get("proposal", {}) if isinstance(plan.get("proposal", {}), dict) else {}
-        first_proposal = proposal.get("proposals", [None])[0] if isinstance(proposal.get("proposals", []), list) else None
+        benchmark_plan = (
+            plan.get("benchmark_plan", {}) if isinstance(plan.get("benchmark_plan", {}), dict) else {}
+        )
+        first_benchmark = (
+            benchmark_plan.get("benchmarks", [None])[0]
+            if isinstance(benchmark_plan.get("benchmarks", []), list)
+            else None
+        )
         payload["query"] = str(args[5]).strip() if len(args) > 5 and str(args[5]).strip() else ""
-        if not payload["query"] and isinstance(first_proposal, dict):
-            payload["query"] = str(first_proposal.get("title", "")).strip() or str(first_proposal.get("objective", "")).strip()
+        if not payload["query"] and isinstance(first_benchmark, dict):
+            payload["query"] = str(first_benchmark.get("title", "")).strip() or str(first_benchmark.get("objective", "")).strip()
         if not payload["query"]:
             payload["query"] = payload["intent"]
         payload["iteration"] = int(args[3]) if len(args) > 3 else 0
@@ -1704,10 +1710,12 @@ def _compact_planner_kb(
         "focus_nodes": [str(x).strip() for x in current_model.get("focus_nodes", []) if str(x).strip()][:max_nodes],
         "domain_hierarchy": _compact_domain_hierarchy(current_model.get("domain_hierarchy", []), max_nodes=max_nodes),
     }
-    current_proposal = kb.get("current_proposal", {}) if isinstance(kb.get("current_proposal", {}), dict) else {}
-    compact_proposal = {
-        "target_nodes": [str(x).strip() for x in current_proposal.get("target_nodes", []) if str(x).strip()][:max_nodes],
-        "proposals": _compact_proposals(current_proposal.get("proposals", []), max_items=max_nodes),
+    current_benchmark_plan = (
+        kb.get("current_benchmark_plan", {}) if isinstance(kb.get("current_benchmark_plan", {}), dict) else {}
+    )
+    compact_benchmark_plan = {
+        "target_nodes": [str(x).strip() for x in current_benchmark_plan.get("target_nodes", []) if str(x).strip()][:max_nodes],
+        "benchmarks": _compact_benchmark_items(current_benchmark_plan.get("benchmarks", []), max_items=max_nodes),
     }
     history = kb.get("history", []) if isinstance(kb.get("history", []), list) else []
     compact_history = []
@@ -1791,7 +1799,7 @@ def _compact_planner_kb(
         "target_coverage": kb.get("target_coverage", 0.0),
         "available_tools": available_tools,
         "current_knowledge_model": compact_model,
-        "current_proposal": compact_proposal,
+        "current_benchmark_plan": compact_benchmark_plan,
         "history": compact_history,
         "research_history": compact_research,
         "pending_contract_amendments": compact_amendments,
@@ -1889,7 +1897,7 @@ def _question_text_from_memo(question_memo: str) -> str:
     return ""
 
 
-def _render_planner_proposal_prompt(payload: dict[str, Any]) -> str:
+def _render_planner_benchmark_prompt(payload: dict[str, Any]) -> str:
     kb = payload.get("knowledge_base", {}) if isinstance(payload.get("knowledge_base", {}), dict) else {}
     model = kb.get("current_knowledge_model", {}) if isinstance(kb.get("current_knowledge_model", {}), dict) else {}
     tools = ", ".join(sorted(str(k) for k, v in (kb.get("available_tools", {}) or {}).items() if v)) or "none"
@@ -1917,7 +1925,7 @@ def _render_planner_proposal_prompt(payload: dict[str, Any]) -> str:
         f"Ranked frontier candidates:\n{frontier_candidates}\n\n"
         f"Selected question:\n{question_memo}\n\n"
         f"Research memo:\n{research_memo}\n\n"
-        "Task: Propose the single best next benchmark proposal memo that directly answers the selected question.\n"
+        "Task: Propose the single best next benchmark-plan memo that directly answers the selected question.\n"
         "Requirements:\n"
         "- non-executable\n"
         "- one benchmark only\n"
@@ -1937,9 +1945,13 @@ def _render_planner_proposal_prompt(payload: dict[str, Any]) -> str:
 def _render_codegen_prompt(payload: dict[str, Any]) -> str:
     kb = payload.get("knowledge_base", {}) if isinstance(payload.get("knowledge_base", {}), dict) else {}
     plan = payload.get("plan", {}) if isinstance(payload.get("plan", {}), dict) else {}
-    proposal = plan.get("proposal", {}) if isinstance(plan.get("proposal", {}), dict) else {}
-    proposal_items = proposal.get("proposals", []) if isinstance(proposal.get("proposals", []), list) else []
-    item = proposal_items[0] if proposal_items else {}
+    benchmark_plan = (
+        plan.get("benchmark_plan", {}) if isinstance(plan.get("benchmark_plan", {}), dict) else {}
+    )
+    benchmark_items = (
+        benchmark_plan.get("benchmarks", []) if isinstance(benchmark_plan.get("benchmarks", []), list) else []
+    )
+    item = benchmark_items[0] if benchmark_items else {}
     current_question = str(plan.get("current_question", "")).strip() or "No current question recorded."
     tools = ", ".join(sorted(str(k) for k, v in (kb.get("available_tools", {}) or {}).items() if v)) or "none"
     relevant_nodes = kb.get("relevant_knowledge_nodes", []) if isinstance(kb.get("relevant_knowledge_nodes", []), list) else []
@@ -1958,7 +1970,7 @@ def _render_codegen_prompt(payload: dict[str, Any]) -> str:
         "Relevant knowledge:\n"
         f"{node_summary}\n\n"
         "Planning context:\n"
-        f"{str(payload.get('proposal_memo', '')).strip() or 'No additional planning context provided.'}\n\n"
+        f"{str(payload.get('planning_memo', '')).strip() or 'No additional planning context provided.'}\n\n"
         "Relevant internal benchmark-plan item:\n"
         f"- title: {str(item.get('title', '')).strip()}\n"
         f"- objective: {str(item.get('objective', '')).strip()}\n"
@@ -2017,9 +2029,11 @@ def _compact_codegen_kb(kb: dict[str, Any], dimension: str) -> dict[str, Any]:
 
 
 def _compact_codegen_plan(plan: dict[str, Any], dimension: str) -> dict[str, Any]:
-    proposal = plan.get("proposal", {}) if isinstance(plan.get("proposal", {}), dict) else {}
+    benchmark_plan = (
+        plan.get("benchmark_plan", {}) if isinstance(plan.get("benchmark_plan", {}), dict) else {}
+    )
     relevant_items = []
-    for item in proposal.get("proposals", []):
+    for item in benchmark_plan.get("benchmarks", []):
         if not isinstance(item, dict):
             continue
         targets = [str(x).strip() for x in item.get("target_node_ids", []) if str(x).strip()]
@@ -2046,11 +2060,11 @@ def _compact_codegen_plan(plan: dict[str, Any], dimension: str) -> dict[str, Any
         "iteration": plan.get("iteration"),
         "planner": _trim_text(plan.get("planner", ""), 64),
         "current_question": _trim_text(plan.get("current_question", ""), 220),
-        "proposal": {
-            "intent_summary": _trim_text(proposal.get("intent_summary", ""), 160),
-            "proposal_summary": _trim_text(proposal.get("proposal_summary", ""), 180),
-            "target_nodes": [str(x).strip() for x in proposal.get("target_nodes", []) if str(x).strip()][:6],
-            "proposals": relevant_items,
+        "benchmark_plan": {
+            "intent_summary": _trim_text(benchmark_plan.get("intent_summary", ""), 160),
+            "plan_summary": _trim_text(benchmark_plan.get("plan_summary", ""), 180),
+            "target_nodes": [str(x).strip() for x in benchmark_plan.get("target_nodes", []) if str(x).strip()][:6],
+            "benchmarks": relevant_items,
         },
         "knowledge_model": {
             "focus_nodes": [str(x).strip() for x in knowledge_model.get("focus_nodes", []) if str(x).strip()][:6],
@@ -2082,9 +2096,9 @@ def _compact_domain_hierarchy(raw_nodes: list[Any], max_nodes: int) -> list[dict
     return compact
 
 
-def _compact_proposals(raw_proposals: list[Any], max_items: int) -> list[dict[str, Any]]:
+def _compact_benchmark_items(raw_benchmarks: list[Any], max_items: int) -> list[dict[str, Any]]:
     compact = []
-    for item in raw_proposals[: max_items * 2]:
+    for item in raw_benchmarks[: max_items * 2]:
         if not isinstance(item, dict):
             continue
         compact.append(
@@ -2135,9 +2149,11 @@ def _trim_planner_payload(payload: dict[str, Any], _target_chars: int) -> dict[s
     model = kb.get("current_knowledge_model", {}) if isinstance(kb.get("current_knowledge_model", {}), dict) else {}
     if isinstance(model.get("domain_hierarchy"), list):
         model["domain_hierarchy"] = model["domain_hierarchy"][:4]
-    proposal = kb.get("current_proposal", {}) if isinstance(kb.get("current_proposal", {}), dict) else {}
-    if isinstance(proposal.get("proposals"), list):
-        proposal["proposals"] = proposal["proposals"][:2]
+    benchmark_plan = (
+        kb.get("current_benchmark_plan", {}) if isinstance(kb.get("current_benchmark_plan", {}), dict) else {}
+    )
+    if isinstance(benchmark_plan.get("benchmarks"), list):
+        benchmark_plan["benchmarks"] = benchmark_plan["benchmarks"][:2]
     return out
 
 
@@ -2148,9 +2164,11 @@ def _trim_codegen_payload(payload: dict[str, Any], _target_chars: int) -> dict[s
     if isinstance(nodes, list):
         kb["relevant_knowledge_nodes"] = nodes[:2]
     plan = out.get("plan", {}) if isinstance(out.get("plan", {}), dict) else {}
-    proposal = plan.get("proposal", {}) if isinstance(plan.get("proposal", {}), dict) else {}
-    if isinstance(proposal.get("proposals"), list):
-        proposal["proposals"] = proposal["proposals"][:1]
+    benchmark_plan = (
+        plan.get("benchmark_plan", {}) if isinstance(plan.get("benchmark_plan", {}), dict) else {}
+    )
+    if isinstance(benchmark_plan.get("benchmarks"), list):
+        benchmark_plan["benchmarks"] = benchmark_plan["benchmarks"][:1]
     return out
 
 
@@ -2183,7 +2201,7 @@ def _default_knowledge_model(intent: str, focus_dimensions: list[str]) -> dict[s
                 "status": "unknown",
                 "rationale": "No verified local evidence yet.",
                 "evidence_refs": [],
-                "open_gaps": [f"Need a baseline benchmark proposal for {dim}."],
+                "open_gaps": [f"Need a baseline benchmark plan for {dim}."],
             }
         )
     return {
@@ -2195,15 +2213,15 @@ def _default_knowledge_model(intent: str, focus_dimensions: list[str]) -> dict[s
     }
 
 
-def _default_proposal(intent: str, focus_dimensions: list[str], iteration: int) -> dict[str, Any]:
-    proposals: list[dict[str, Any]] = []
+def _default_benchmark_plan(intent: str, focus_dimensions: list[str], iteration: int) -> dict[str, Any]:
+    benchmarks: list[dict[str, Any]] = []
     target_nodes: list[str] = []
     for idx, dim in enumerate(focus_dimensions):
         node_id = f"feature_{idx}"
         target_nodes.append(node_id)
-        proposals.append(
+        benchmarks.append(
             {
-                "id": f"proposal_{iteration}_{idx}",
+                "id": f"benchmark_plan_{iteration}_{idx}",
                 "title": f"Baseline benchmark for {dim}",
                 "objective": f"Establish the first measurable characterization for {dim}.",
                 "target_node_ids": [node_id],
@@ -2212,7 +2230,7 @@ def _default_proposal(intent: str, focus_dimensions: list[str], iteration: int) 
                 "description": f"Start with a simple benchmark that isolates {dim}.",
                 "hypothesis": f"A minimal benchmark can produce first evidence for {dim}.",
                 "required_evidence": ["Successful execution", "Auditable measurement artifacts"],
-                "rationale": "Curriculum-first proposal from fallback planner.",
+                "rationale": "Curriculum-first benchmark plan from fallback planner.",
                 "prerequisites": [],
                 "next_if_success": [f"Expand {dim} into a parameter sweep."],
                 "next_if_failure": [f"Simplify or repair the benchmark design for {dim}."],
@@ -2220,10 +2238,10 @@ def _default_proposal(intent: str, focus_dimensions: list[str], iteration: int) 
         )
     return {
         "intent_summary": intent,
-        "proposal_summary": "Fallback non-executable proposal.",
+        "plan_summary": "Fallback non-executable benchmark plan.",
         "target_nodes": target_nodes,
-        "proposals": proposals,
-        "planner_notes": "Fallback proposal generated without domain-specific executable content.",
+        "benchmarks": benchmarks,
+        "planner_notes": "Fallback benchmark plan generated without domain-specific executable content.",
         "generated_at": "",
     }
 
@@ -2295,23 +2313,23 @@ def _sanitize_knowledge_model(raw: dict[str, Any], intent: str, focus_nodes: lis
     }
 
 
-def _sanitize_proposal(raw: dict[str, Any], intent: str, focus_nodes: list[str], iteration: int) -> dict[str, Any]:
+def _sanitize_benchmark_plan(raw: dict[str, Any], intent: str, focus_nodes: list[str], iteration: int) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raw = {}
-    proposals_raw = raw.get("proposals", [])
-    clean_proposals: list[dict[str, Any]] = []
-    if isinstance(proposals_raw, list):
-        for idx, item in enumerate(proposals_raw[:50]):
+    benchmarks_raw = raw.get("benchmarks", [])
+    clean_benchmarks: list[dict[str, Any]] = []
+    if isinstance(benchmarks_raw, list):
+        for idx, item in enumerate(benchmarks_raw[:50]):
             if not isinstance(item, dict):
                 continue
-            proposal_id = str(item.get("id", "")).strip() or f"proposal_{iteration}_{idx}"
+            benchmark_id = str(item.get("id", "")).strip() or f"benchmark_plan_{iteration}_{idx}"
             title = str(item.get("title", "")).strip()
             objective = str(item.get("objective", "")).strip()
             if not title or not objective:
                 continue
-            clean_proposals.append(
+            clean_benchmarks.append(
                 {
-                    "id": proposal_id,
+                    "id": benchmark_id,
                     "title": title,
                     "objective": objective,
                     "target_node_ids": [str(x).strip() for x in item.get("target_node_ids", []) if str(x).strip()],
@@ -2326,24 +2344,24 @@ def _sanitize_proposal(raw: dict[str, Any], intent: str, focus_nodes: list[str],
                     "next_if_failure": [str(x).strip() for x in item.get("next_if_failure", []) if str(x).strip()],
                 }
             )
-    if not clean_proposals:
-        return _default_proposal(intent=intent, focus_dimensions=focus_nodes, iteration=iteration)
+    if not clean_benchmarks:
+        return _default_benchmark_plan(intent=intent, focus_dimensions=focus_nodes, iteration=iteration)
     target_nodes = [str(x).strip() for x in raw.get("target_nodes", []) if str(x).strip()]
     if not target_nodes:
-        target_nodes = _proposal_focus_nodes({"proposals": clean_proposals})
+        target_nodes = _benchmark_plan_focus_nodes({"benchmarks": clean_benchmarks})
     return {
         "intent_summary": str(raw.get("intent_summary", intent)).strip() or intent,
-        "proposal_summary": str(raw.get("proposal_summary", "")).strip(),
+        "plan_summary": str(raw.get("plan_summary", raw.get("proposal_summary", ""))).strip(),
         "target_nodes": target_nodes,
-        "proposals": clean_proposals,
+        "benchmarks": clean_benchmarks,
         "planner_notes": str(raw.get("planner_notes", "")).strip(),
         "generated_at": str(raw.get("generated_at", "")).strip(),
     }
 
 
-def _proposal_reason_from_memo(memo: str) -> str:
+def _benchmark_plan_reason_from_memo(memo: str) -> str:
     section = _extract_numbered_section(memo, "Why This First")
-    return section or "Planner produced proposal memo."
+    return section or "Planner produced benchmark-plan memo."
 
 
 def _codegen_reason_from_memo(memo: str) -> str:
@@ -2351,22 +2369,22 @@ def _codegen_reason_from_memo(memo: str) -> str:
     return _first_nonempty_line(section) or "Code generator produced implementation memo."
 
 
-def _proposal_from_memo(memo: str, intent: str, focus_nodes: list[str], iteration: int) -> dict[str, Any]:
+def _benchmark_plan_from_memo(memo: str, intent: str, focus_nodes: list[str], iteration: int) -> dict[str, Any]:
     target_dimension = _first_nonempty_line(_extract_numbered_section(memo, "Target Dimension"))
     why_first = _extract_numbered_section(memo, "Why This First")
     benchmark_idea = _extract_numbered_section(memo, "Benchmark Idea")
     required_evidence = _extract_bullets_or_lines(_extract_numbered_section(memo, "Required Evidence"))
     success_unlocks = _extract_bullets_or_lines(_extract_numbered_section(memo, "What Success Unlocks"))
     if not target_dimension:
-        return _default_proposal(intent=intent, focus_dimensions=focus_nodes, iteration=iteration)
+        return _default_benchmark_plan(intent=intent, focus_dimensions=focus_nodes, iteration=iteration)
     target_node = _slugify_dimension(target_dimension) or (focus_nodes[0] if focus_nodes else f"feature_{iteration}")
     return {
         "intent_summary": intent,
-        "proposal_summary": benchmark_idea or f"Initial benchmark proposal for {target_dimension}.",
+        "plan_summary": benchmark_idea or f"Initial benchmark plan for {target_dimension}.",
         "target_nodes": [target_node],
-        "proposals": [
+        "benchmarks": [
             {
-                "id": f"proposal_{iteration}_0",
+                "id": f"benchmark_plan_{iteration}_0",
                 "title": f"Baseline benchmark for {target_dimension}",
                 "objective": benchmark_idea or f"Establish first evidence for {target_dimension}.",
                 "target_node_ids": [target_node],
@@ -2392,11 +2410,13 @@ def _benchmark_from_memo(
     dimension: str,
     iteration: int,
     benchmark_index: int,
-    proposal: dict[str, Any],
+    benchmark_plan: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     _ = intent
-    proposal_items = proposal.get("proposals", []) if isinstance(proposal.get("proposals", []), list) else []
-    item = proposal_items[0] if proposal_items else {}
+    benchmark_items = (
+        benchmark_plan.get("benchmarks", []) if isinstance(benchmark_plan.get("benchmarks", []), list) else []
+    )
+    item = benchmark_items[0] if benchmark_items else {}
     summary = _extract_numbered_section(memo, "Implementation Summary")
     source_section = _extract_numbered_section(memo, "CUDA Source File")
     command_section = _extract_numbered_section(memo, "Build and Run Command")
@@ -2442,14 +2462,14 @@ def _benchmark_from_memo(
     if feasibility in {"feasible_with_revision", "not_feasible"} or complexity in {"high", "excessive"}:
         amendment_list.append(
             {
-                "path": "proposal.proposals[0]",
+                "path": "benchmark_plan.benchmarks[0]",
                 "change": "Clarify or simplify the implementation scope before the next codegen attempt.",
                 "rationale": "; ".join(risks) if risks else f"Implementation memo reported {feasibility} with {complexity} complexity.",
                 "priority": "high" if feasibility == "not_feasible" or complexity == "excessive" else "medium",
             }
         )
 
-    benchmark_id = str(item.get("id", "")).strip() or f"proposal_{iteration}_{benchmark_index}"
+    benchmark_id = str(item.get("id", "")).strip() or f"benchmark_plan_{iteration}_{benchmark_index}"
     title = str(item.get("title", "")).strip() or f"Benchmark for {dimension}"
     hypothesis = str(item.get("hypothesis", "")).strip() or _first_nonempty_line(summary) or title
     analysis_method = {
@@ -2522,14 +2542,14 @@ def _render_codegen_repair_prompt(
     ).strip()
 
 
-def _sanitize_research_request(raw: dict[str, Any], intent: str, proposal: dict[str, Any]) -> dict[str, Any] | None:
+def _sanitize_research_request(raw: dict[str, Any], intent: str, benchmark_plan: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         raw = {}
     target_nodes = [str(x).strip() for x in raw.get("target_nodes", []) if str(x).strip()]
     target_questions = [str(x).strip() for x in raw.get("target_questions", []) if str(x).strip()]
     search_topics = [str(x).strip() for x in raw.get("search_topics", []) if str(x).strip()]
     if not any([target_nodes, target_questions, search_topics]):
-        fallback_focus = [str(x).strip() for x in proposal.get("target_nodes", []) if str(x).strip()]
+        fallback_focus = [str(x).strip() for x in benchmark_plan.get("target_nodes", []) if str(x).strip()]
         if not fallback_focus:
             return None
         return _default_research_request(intent=intent, focus_dimensions=fallback_focus)
@@ -2546,15 +2566,15 @@ def _sanitize_research_request(raw: dict[str, Any], intent: str, proposal: dict[
     }
 
 
-def _proposal_focus_nodes(proposal: dict[str, Any]) -> list[str]:
-    if not isinstance(proposal, dict):
+def _benchmark_plan_focus_nodes(benchmark_plan: dict[str, Any]) -> list[str]:
+    if not isinstance(benchmark_plan, dict):
         return []
     out: list[str] = []
-    for item in proposal.get("target_nodes", []):
+    for item in benchmark_plan.get("target_nodes", []):
         node = str(item).strip()
         if node and node not in out:
             out.append(node)
-    for item in proposal.get("proposals", []):
+    for item in benchmark_plan.get("benchmarks", []):
         if not isinstance(item, dict):
             continue
         for node_item in item.get("target_node_ids", []):
@@ -2845,7 +2865,7 @@ def _default_negotiation_policy() -> dict[str, Any]:
             "observability_score": 0.3,
         },
         "max_amendment_rounds": 2,
-        "amendment_policy": "Reject below-threshold proposals and request a revised implementation with explicit rationale.",
+        "amendment_policy": "Reject below-threshold benchmark plans and request a revised implementation with explicit rationale.",
     }
 
 
@@ -2881,23 +2901,23 @@ def _merge_schema_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "version": str(contract.get("version", "1.0")),
         "negotiation_policy": _policy_from_contract(contract),
         "research_request_output": contract.get("research_request_output", {}),
-        "proposal_output": contract.get("proposal_output", {}),
+        "benchmark_plan_output": contract.get("benchmark_plan_output", contract.get("proposal_output", {})),
         "implementation_output": contract.get("implementation_output", {}),
         "analysis_output": contract.get("analysis_output", {}),
     }
     if not isinstance(merged["research_request_output"], dict):
         merged["research_request_output"] = {}
-    if not isinstance(merged["proposal_output"], dict):
-        merged["proposal_output"] = {}
+    if not isinstance(merged["benchmark_plan_output"], dict):
+        merged["benchmark_plan_output"] = {}
     if legacy_planner:
-        merged["proposal_output"] = {
+        merged["benchmark_plan_output"] = {
             **legacy_planner,
-            **merged["proposal_output"],
+            **merged["benchmark_plan_output"],
         }
     if not merged["research_request_output"]:
         merged["research_request_output"] = {"required_keys": ["reason", "research_request"]}
-    if not merged["proposal_output"]:
-        merged["proposal_output"] = {"required_keys": ["reason", "proposal"]}
+    if not merged["benchmark_plan_output"]:
+        merged["benchmark_plan_output"] = {"required_keys": ["reason", "benchmark_plan"]}
     for key in ["implementation_output", "analysis_output"]:
         if not isinstance(merged[key], dict):
             merged[key] = {}

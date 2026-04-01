@@ -194,7 +194,7 @@ class Orchestrator:
                     self._append_research_history(kb_path=kb_path, iteration=iteration, research=research)
                     knowledge_base = self._load_kb(kb_path)
 
-                proposal_task = Task(
+                benchmark_plan_task = Task(
                     id=f"iter{iteration}-llm-plan-benchmark-0",
                     kind="llm_plan_benchmark",
                     payload={
@@ -212,14 +212,14 @@ class Orchestrator:
                         "current_question": research_plan.get("current_question"),
                     },
                 )
-                completed.append(self._run_with_retry(proposal_task, ctx))
+                completed.append(self._run_with_retry(benchmark_plan_task, ctx))
                 self._persist_run_log(run_dir, completed)
-                if proposal_task.status != "done":
+                if benchmark_plan_task.status != "done":
                     self._update_run_state(kb_path, status="stopped", reason="planner_benchmark_failed", iteration=iteration)
                     break
                 self._increment_run_counter(kb_path, "planner_calls")
-                plan = self._canonicalize_markdown_result("llm_plan_benchmark", proposal_task.result or {})
-                proposal_task.result = plan
+                plan = self._canonicalize_markdown_result("llm_plan_benchmark", benchmark_plan_task.result or {})
+                benchmark_plan_task.result = plan
                 self._append_planner_outputs(kb_path=kb_path, iteration=iteration, plan=plan)
                 knowledge_base = self._load_kb(kb_path)
 
@@ -446,9 +446,9 @@ class Orchestrator:
         plan = self._canonicalize_markdown_result("llm_plan_benchmark", plan)
         kb = self._load_kb(kb_path)
         kb.setdefault("planner_history", [])
-        proposal = plan.get("proposal", {})
+        benchmark_plan = plan.get("benchmark_plan", {})
         kb["current_question"] = plan.get("current_question")
-        kb["current_proposal"] = proposal if isinstance(proposal, dict) else {}
+        kb["current_benchmark_plan"] = benchmark_plan if isinstance(benchmark_plan, dict) else {}
         kb["planner_history"].append(
             {
                 "iteration": iteration,
@@ -456,7 +456,7 @@ class Orchestrator:
                 "planner": plan.get("planner"),
                 "reason": plan.get("reason"),
                 "current_question": plan.get("current_question"),
-                "proposal": proposal if isinstance(proposal, dict) else {},
+                "benchmark_plan": benchmark_plan if isinstance(benchmark_plan, dict) else {},
                 "timestamp": time.time(),
             }
         )
@@ -941,7 +941,7 @@ class Orchestrator:
         if task_kind == "llm_research":
             return [("research-raw", "raw_artifact"), ("research-memo", "artifact_md")]
         if task_kind == "llm_plan_benchmark":
-            return [("proposal-raw", "proposal_raw_artifact")]
+            return [("benchmark-plan-raw", "benchmark_plan_raw_artifact")]
         if task_kind == "llm_generate_implementation":
             return [
                 ("implementation-prompt", "prompt_artifact"),

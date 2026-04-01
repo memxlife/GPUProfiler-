@@ -166,11 +166,11 @@ def test_codegen_prompt_uses_current_question_as_primary_context():
         "iteration": 0,
         "planner": "heuristic",
         "current_question": "For 2.1 Global Memory Access, what evidence is still needed to satisfy this frontier criterion: The benchmark conditions are documented clearly enough for reuse?",
-        "proposal": {
+        "benchmark_plan": {
             "target_nodes": ["dram_bandwidth"],
-            "proposals": [
+            "benchmarks": [
                 {
-                    "id": "proposal_0",
+                    "id": "benchmark_plan_0",
                     "title": "Baseline benchmark for dram_bandwidth",
                     "objective": "Measure sustained global-memory bandwidth.",
                     "target_node_ids": ["dram_bandwidth"],
@@ -187,7 +187,7 @@ def test_codegen_prompt_uses_current_question_as_primary_context():
         "dimension": "dram_bandwidth",
         "knowledge_base": _compact_codegen_kb(kb, "dram_bandwidth"),
         "plan": _compact_codegen_plan(plan, "dram_bandwidth"),
-        "proposal_memo": "# Planning Context\n\n## Current Question\nNeed reusable documented benchmark conditions.\n",
+        "planning_memo": "# Planning Context\n\n## Current Question\nNeed reusable documented benchmark conditions.\n",
     }
 
     prompt = _render_codegen_prompt(payload)

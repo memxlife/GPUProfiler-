@@ -81,11 +81,11 @@ def agent_dimension_slug(agent_name: str, query: str) -> str:
 def build_probe_plan(agent_name: str, query: str) -> dict[str, Any]:
     dimension = agent_dimension_slug(agent_name, query)
     return {
-        "proposal": {
+        "benchmark_plan": {
             "target_nodes": [dimension],
-            "proposals": [
+            "benchmarks": [
                 {
-                    "id": f"{agent_name}_proposal_0",
+                    "id": f"{agent_name}_benchmark_plan_0",
                     "title": query,
                     "objective": query,
                     "hypothesis": query,
@@ -94,7 +94,7 @@ def build_probe_plan(agent_name: str, query: str) -> dict[str, Any]:
                 }
             ],
         },
-        "proposal_md_artifact": "",
+        "benchmark_plan_md_artifact": "",
     }
 
 
@@ -103,7 +103,7 @@ def build_execution_results(agent_name: str, query: str) -> list[dict[str, Any]]
     return [
         {
             "iteration": 0,
-            "benchmark_id": f"{agent_name}_proposal_0",
+            "benchmark_id": f"{agent_name}_benchmark_plan_0",
             "hypothesis": query,
             "dimensions": [dimension],
             "workload": {
@@ -136,7 +136,7 @@ def build_agent_fixture(agent_name: str, intent: str, query: str, max_sources: i
         "research_request": research_request,
         "research_request_memo": query,
         "research_memo": query,
-        "proposal_memo": query,
+        "planning_memo": query,
         "plan": plan,
         "execution_results": build_execution_results(agent_name, query),
     }
@@ -172,14 +172,14 @@ def evaluate_agent_result(agent_name: str, result: Any) -> dict[str, Any]:
             "unique_source_count": len(unique_sources),
         }
     if agent_name == "plan_benchmark":
-        proposal = result.proposal if isinstance(result.proposal, dict) else {}
-        proposals = proposal.get("proposals", []) if isinstance(proposal.get("proposals", []), list) else []
-        meaningful = bool(result.reason.strip()) and len(proposals) >= 1
+        benchmark_plan = result.benchmark_plan if isinstance(result.benchmark_plan, dict) else {}
+        benchmarks = benchmark_plan.get("benchmarks", []) if isinstance(benchmark_plan.get("benchmarks", []), list) else []
+        meaningful = bool(result.reason.strip()) and len(benchmarks) >= 1
         return {
             "meaningful": meaningful,
             "reason_present": bool(result.reason.strip()),
-            "proposal_count": len(proposals),
-            "target_node_count": len(proposal.get("target_nodes", [])) if isinstance(proposal.get("target_nodes", []), list) else 0,
+            "benchmark_plan_count": len(benchmarks),
+            "target_node_count": len(benchmark_plan.get("target_nodes", [])) if isinstance(benchmark_plan.get("target_nodes", []), list) else 0,
         }
     if agent_name == "generate_implementation":
         benchmarks = result.benchmarks if isinstance(result.benchmarks, list) else []
@@ -226,7 +226,7 @@ def serialize_agent_result(agent_name: str, result: Any) -> dict[str, Any]:
     if agent_name == "plan_benchmark":
         return {
             "reason": result.reason,
-            "proposal": result.proposal,
+            "benchmark_plan": result.benchmark_plan,
             "planner": result.planner,
             "raw_response": result.raw_response,
         }
@@ -299,7 +299,7 @@ def run_agent_probe_attempt(
                 plan=fixture["plan"],
                 iteration=fixture["iteration"],
                 max_benchmarks=fixture["max_benchmarks"],
-                proposal_memo=fixture["proposal_memo"],
+                planning_memo=fixture["planning_memo"],
             )
         elif agent_name == "analyze_results":
             result = backend.analyze_results(

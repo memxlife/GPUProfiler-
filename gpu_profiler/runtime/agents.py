@@ -13,7 +13,7 @@ from ..workflow.llm import (
     _compact_codegen_kb,
     _compact_codegen_plan,
     _enforce_payload_budget,
-    _proposal_focus_nodes,
+    _benchmark_plan_focus_nodes,
     _render_codegen_prompt,
     _slugify_dimension,
     _trim_codegen_payload,
@@ -137,13 +137,13 @@ class LLMPlanningAgent(Agent):
                 "planner": decision.planner,
                 "reason": decision.reason,
                 "current_question": decision.current_question,
-                "proposal": decision.proposal,
+                "benchmark_plan": decision.benchmark_plan,
                 "knowledge_model_artifact": task.payload.get("knowledge_model_artifact"),
             }
-            proposal_raw_path = iter_dir / "proposal_raw.md"
+            benchmark_plan_raw_path = iter_dir / "benchmark_plan_raw.md"
             if decision.raw_response:
-                write_text(proposal_raw_path, decision.raw_response)
-            plan["proposal_raw_artifact"] = str(proposal_raw_path) if decision.raw_response else None
+                write_text(benchmark_plan_raw_path, decision.raw_response)
+            plan["benchmark_plan_raw_artifact"] = str(benchmark_plan_raw_path) if decision.raw_response else None
             return plan
 
         decision = self.workflow_backend.propose_plan(
@@ -160,7 +160,7 @@ class LLMPlanningAgent(Agent):
             "reason": decision.reason,
             "current_question": decision.current_question,
             "knowledge_model": decision.knowledge_model,
-            "proposal": decision.proposal,
+            "benchmark_plan": decision.benchmark_plan,
             "research_request": decision.research_request,
         }
         model_path = iter_dir / "knowledge_model.json"
@@ -290,10 +290,10 @@ class LLMCodegenAgent(Agent):
         max_benchmarks = int(task.payload.get("max_benchmarks", 2))
         amendment_round = int(task.payload.get("amendment_round", 0))
         amendment_feedback = task.payload.get("amendment_feedback", [])
-        working_proposal_memo = _build_planning_context_memo(plan=plan, kb=kb)
+        working_planning_memo = _build_planning_context_memo(plan=plan, kb=kb)
 
         prompt_sections: list[str] = []
-        focus = _proposal_focus_nodes(plan.get("proposal", {}))[: max(1, max_benchmarks)]
+        focus = _benchmark_plan_focus_nodes(plan.get("benchmark_plan", {}))[: max(1, max_benchmarks)]
         if not focus:
             focus = _planning_focus_nodes(plan=plan, kb=kb)[: max(1, max_benchmarks)]
         if not focus:
@@ -315,7 +315,7 @@ class LLMCodegenAgent(Agent):
                     plan=plan,
                     iteration=iteration,
                     focus=focus,
-                    proposal_memo=working_proposal_memo,
+                    planning_memo=working_planning_memo,
                     start_index=len(prompt_sections),
                 )
             )
@@ -325,7 +325,7 @@ class LLMCodegenAgent(Agent):
                 plan=plan,
                 iteration=iteration,
                 max_benchmarks=max_benchmarks,
-                proposal_memo=working_proposal_memo,
+                planning_memo=working_planning_memo,
             )
             accepted, rejected, policy = _apply_negotiation_policy(
                 benchmarks=decision.benchmarks,
@@ -340,7 +340,7 @@ class LLMCodegenAgent(Agent):
             if not failure_notes:
                 break
             preflight_feedback.append(failure_notes)
-            working_proposal_memo = _append_codegen_feedback(working_proposal_memo, preflight_feedback)
+            working_planning_memo = _append_codegen_feedback(working_planning_memo, preflight_feedback)
         else:
             generated_files = []
 
@@ -348,7 +348,7 @@ class LLMCodegenAgent(Agent):
         feasibility_report = _build_feasibility_report(
             accepted=accepted,
             rejected=rejected,
-            proposal=plan.get("proposal", {}),
+            benchmark_plan=plan.get("benchmark_plan", {}),
         )
 
         implementation = {
@@ -1178,8 +1178,9 @@ def _annotate_feasibility(benchmark: dict[str, Any], policy: dict[str, Any]) -> 
 
 
 def _build_feasibility_report(
-    accepted: list[dict[str, Any]], rejected: list[dict[str, Any]], proposal: dict[str, Any]
+    accepted: list[dict[str, Any]], rejected: list[dict[str, Any]], benchmark_plan: dict[str, Any]
 ) -> dict[str, Any]:
+    _ = benchmark_plan
     items: list[dict[str, Any]] = []
     for item in accepted:
         benchmark_id = str(item.get("id", "")).strip()
@@ -1187,10 +1188,10 @@ def _build_feasibility_report(
         feasibility_status = str(item.get("feasibility_status", "feasible")).strip() or "feasible"
         recommended_changes: list[str] = []
         if feasibility_status == "feasible_with_revision":
-            recommended_changes.append("Reduce implementation complexity or split this proposal into smaller steps.")
+            recommended_changes.append("Reduce implementation complexity or split this benchmark plan into smaller steps.")
         items.append(
             {
-                "proposal_id": benchmark_id,
+                "benchmark_plan_id": benchmark_id,
                 "feasibility_status": feasibility_status,
                 "implementation_complexity": complexity,
                 "summary": "Implementation can be generated under the current codegen constraints.",
@@ -1204,14 +1205,14 @@ def _build_feasibility_report(
         )
     for item in rejected:
         reasons = [str(x).strip() for x in item.get("reasons", []) if str(x).strip()]
-        recommend = ["Revise the proposal to improve implementability and reduce implementation risk."]
+        recommend = ["Revise the benchmark plan to improve implementability and reduce implementation risk."]
         if "implementability_below_min" in reasons:
             recommend.append("Simplify the implementation scope or reduce dependency/tooling assumptions.")
         if "utility_below_min" in reasons or "coverage_gain_below_min" in reasons:
             recommend.append("Clarify why this benchmark is needed at the current curriculum stage.")
         items.append(
             {
-                "proposal_id": str(item.get("id", "")).strip(),
+                "benchmark_plan_id": str(item.get("id", "")).strip(),
                 "feasibility_status": "not_feasible",
                 "implementation_complexity": "excessive" if "implementability_below_min" in reasons else "high",
                 "summary": "Implementation was rejected during codegen acceptance checks.",
@@ -1236,31 +1237,31 @@ def _build_feasibility_report(
     }
 
 
-def _render_proposal_md(plan: dict[str, Any]) -> str:
-    proposal = plan.get("proposal", {}) if isinstance(plan.get("proposal", {}), dict) else {}
+def _render_benchmark_plan_md(plan: dict[str, Any]) -> str:
+    benchmark_plan = plan.get("benchmark_plan", {}) if isinstance(plan.get("benchmark_plan", {}), dict) else {}
     lines = [
-        f"# Iteration {plan.get('iteration')} Proposal",
+        f"# Iteration {plan.get('iteration')} Benchmark Plan",
         "",
         "## Metadata",
         f"- planner: `{plan.get('planner')}`",
         f"- reason: {plan.get('reason')}",
         "",
-        "## Proposal Summary",
-        proposal.get("proposal_summary", ""),
+        "## Benchmark Plan Summary",
+        benchmark_plan.get("plan_summary", ""),
         "",
         "## Current Question",
         str(plan.get("current_question", "")).strip() or "No current question recorded.",
         "",
         "## Target Nodes",
     ]
-    target_nodes = [str(x).strip() for x in proposal.get("target_nodes", []) if str(x).strip()]
+    target_nodes = [str(x).strip() for x in benchmark_plan.get("target_nodes", []) if str(x).strip()]
     if target_nodes:
         for item in target_nodes:
             lines.append(f"- {item}")
     else:
         lines.append("- none")
-    lines.extend(["", "## Proposed Benchmarks"])
-    for index, item in enumerate(proposal.get("proposals", []), start=1):
+    lines.extend(["", "## Planned Benchmarks"])
+    for index, item in enumerate(benchmark_plan.get("benchmarks", []), start=1):
         lines.extend(
             [
                 f"### Benchmark {index}",
@@ -1349,11 +1350,15 @@ def _update_knowledge_model(
     model = current_model if isinstance(current_model, dict) and isinstance(current_model.get("domain_hierarchy", []), list) else _empty_knowledge_model(intent)
     hierarchy = [dict(item) for item in model.get("domain_hierarchy", []) if isinstance(item, dict)]
     nodes_by_id = {str(item.get("id", "")).strip(): item for item in hierarchy if str(item.get("id", "")).strip()}
-    proposal = plan.get("proposal", {}) if isinstance(plan.get("proposal", {}), dict) else {}
-    proposal_items = proposal.get("proposals", []) if isinstance(proposal.get("proposals", []), list) else []
+    benchmark_plan = (
+        plan.get("benchmark_plan", {}) if isinstance(plan.get("benchmark_plan", {}), dict) else {}
+    )
+    benchmark_items = (
+        benchmark_plan.get("benchmarks", []) if isinstance(benchmark_plan.get("benchmarks", []), list) else []
+    )
     covered = {str(x).strip() for x in covered_dimensions if str(x).strip()}
 
-    for item in proposal_items:
+    for item in benchmark_items:
         if not isinstance(item, dict):
             continue
         title = str(item.get("title", "")).strip()
@@ -1361,7 +1366,7 @@ def _update_knowledge_model(
         hypothesis = str(item.get("hypothesis", "")).strip()
         target_ids = [str(x).strip() for x in item.get("target_node_ids", []) if str(x).strip()]
         if not target_ids:
-            target_ids = [str(x).strip() for x in proposal.get("target_nodes", []) if str(x).strip()]
+            target_ids = [str(x).strip() for x in benchmark_plan.get("target_nodes", []) if str(x).strip()]
         for node_id in target_ids:
             if not node_id:
                 continue
@@ -1374,7 +1379,7 @@ def _update_knowledge_model(
                     "parent_id": None,
                     "node_type": "feature",
                     "status": "unknown",
-                    "rationale": hypothesis or "Added from planner proposal.",
+                    "rationale": hypothesis or "Added from planner benchmark plan.",
                     "evidence_refs": [],
                     "open_gaps": [],
                 }
@@ -1416,7 +1421,7 @@ def _update_knowledge_model(
                 refs.append(ref)
             node["evidence_refs"] = refs[:10]
 
-    focus_nodes = [str(x).strip() for x in proposal.get("target_nodes", []) if str(x).strip()]
+    focus_nodes = [str(x).strip() for x in benchmark_plan.get("target_nodes", []) if str(x).strip()]
     if not focus_nodes:
         focus_nodes = [item["id"] for item in hierarchy[: min(3, len(hierarchy))]]
     return {
@@ -1708,7 +1713,7 @@ def _build_codegen_prompt_sections(
     plan: dict[str, Any],
     iteration: int,
     focus: list[str],
-    proposal_memo: str,
+    planning_memo: str,
     start_index: int = 0,
 ) -> list[str]:
     sections: list[str] = []
@@ -1719,7 +1724,7 @@ def _build_codegen_prompt_sections(
             "plan": _compact_codegen_plan(plan=plan, dimension=dim),
             "iteration": iteration,
             "dimension": dim,
-            "proposal_memo": _trim_text(proposal_memo, 3000),
+            "planning_memo": _trim_text(planning_memo, 3000),
             "constraints": {
                 "bounded_runtime": "Each command should complete in <= 45 seconds when possible.",
                 "safety": "No destructive commands, no system configuration mutation.",
@@ -1909,12 +1914,12 @@ def _format_preflight_feedback(reports: list[dict[str, Any]]) -> str:
     return "\n".join(lines).strip()
 
 
-def _append_codegen_feedback(proposal_memo: str, feedback: list[str]) -> str:
+def _append_codegen_feedback(planning_memo: str, feedback: list[str]) -> str:
     clean_feedback = [str(item).strip() for item in feedback if str(item).strip()]
     if not clean_feedback:
-        return proposal_memo
+        return planning_memo
     return (
-        f"{proposal_memo.rstrip()}\n\n"
+        f"{planning_memo.rstrip()}\n\n"
         "Preflight repair feedback:\n"
         "Your previous implementation did not compile locally. Return a corrected full implementation.\n"
         + "\n\n".join(clean_feedback)
@@ -1925,8 +1930,10 @@ def _infer_target_dimensions(
     plan: dict[str, Any], execution_results: list[dict[str, Any]], claims: list[dict[str, Any]]
 ) -> list[str]:
     dims: list[str] = []
-    proposal = plan.get("proposal", {}) if isinstance(plan.get("proposal", {}), dict) else {}
-    for d in proposal.get("target_nodes", []):
+    benchmark_plan = (
+        plan.get("benchmark_plan", {}) if isinstance(plan.get("benchmark_plan", {}), dict) else {}
+    )
+    for d in benchmark_plan.get("target_nodes", []):
         dim = str(d).strip()
         if dim and dim not in dims:
             dims.append(dim)
