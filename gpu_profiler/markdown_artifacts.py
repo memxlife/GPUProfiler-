@@ -125,6 +125,28 @@ def parse_proposal_markdown(text: str) -> dict[str, Any]:
     }
 
 
+def parse_research_markdown(text: str) -> dict[str, Any]:
+    findings_section = markdown_section(text, "Findings")
+    finding_sections = split_markdown_sections(findings_section, level=3)
+    findings: list[dict[str, Any]] = []
+    for title, body in finding_sections.items():
+        fields = markdown_key_values(body)
+        findings.append(
+            {
+                "title": fields.get("title", title.strip()),
+                "relevance": fields.get("relevance", ""),
+                "source_url": fields.get("source", ""),
+                "summary": fields.get("summary", ""),
+            }
+        )
+    return {
+        "request_summary": markdown_scalar(markdown_section(text, "Request Summary")),
+        "proposed_dimensions": markdown_bullets(markdown_section(text, "Proposed Dimensions")),
+        "unanswered_questions": markdown_bullets(markdown_section(text, "Unanswered Questions")),
+        "findings": findings,
+    }
+
+
 def parse_analysis_markdown(text: str) -> dict[str, Any]:
     metadata = markdown_key_values(markdown_section(text, "Metadata"))
     claims_section = markdown_section(text, "Claims")

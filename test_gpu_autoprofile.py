@@ -18,6 +18,7 @@ from gpu_profiler.agents import (
     _preflight_single_benchmark,
     _render_analysis_md,
     _render_proposal_md,
+    _render_research_md,
     _render_research_request_md,
 )
 from gpu_profiler.llm import (
@@ -42,6 +43,7 @@ from gpu_profiler.llm import (
 from gpu_profiler.markdown_artifacts import (
     parse_analysis_markdown,
     parse_proposal_markdown,
+    parse_research_markdown,
     parse_research_request_markdown,
 )
 from gpu_profiler.models import AgentContext, RetryPolicy, Task
@@ -324,6 +326,35 @@ def test_parse_analysis_markdown_round_trip():
     assert parsed["claims"][0]["dimensions"] == ["dram_bandwidth"]
 
 
+def test_parse_research_markdown_round_trip():
+    rendered = _render_research_md(
+        {
+            "iteration": 0,
+            "planner": "test-researcher",
+            "reason": "Need prior-art context before coding.",
+            "request_summary": "Find prior methods for cache and bandwidth characterization.",
+            "proposed_dimensions": ["dram_bandwidth", "l2_cache"],
+            "unanswered_questions": ["Which counters best separate L2 and DRAM effects?"],
+            "findings": [
+                {
+                    "title": "Bandwidth microbenchmark pattern",
+                    "relevance": "high",
+                    "source_url": "https://example.com/bw",
+                    "summary": "A sequential load benchmark is a good first bandwidth probe.",
+                }
+            ],
+        }
+    )
+
+    parsed = parse_research_markdown(rendered)
+
+    assert parsed["request_summary"] == "Find prior methods for cache and bandwidth characterization."
+    assert parsed["proposed_dimensions"] == ["dram_bandwidth", "l2_cache"]
+    assert parsed["unanswered_questions"] == ["Which counters best separate L2 and DRAM effects?"]
+    assert len(parsed["findings"]) == 1
+    assert parsed["findings"][0]["title"] == "Bandwidth microbenchmark pattern"
+
+
 def test_llm_research_agent_accepts_markdown_only_request_artifact(tmp_path):
     request_md = tmp_path / "research_request.md"
     request_md.write_text(
@@ -362,6 +393,108 @@ def test_llm_research_agent_accepts_markdown_only_request_artifact(tmp_path):
     assert result["request_summary"] == "Measure local capabilities."
     assert result["research_request_meta_artifact"] is None
     assert (tmp_path / "iterations" / "iter_00" / "research.md").exists()
+
+
+def test_orchestrator_prefers_proposal_markdown_for_current_proposal(tmp_path):
+    proposal_md = tmp_path / "proposal.md"
+    proposal_md.write_text(
+        _render_proposal_md(
+            {
+                "iteration": 0,
+                "planner": "markdown-planner",
+                "reason": "Use the canonical proposal memo.",
+                "proposal": {
+                    "proposal_summary": "Canonical proposal summary from markdown.",
+                    "target_nodes": ["dram_bandwidth"],
+                    "proposals": [
+                        {
+                            "id": "proposal_0_0",
+                            "title": "Canonical bandwidth benchmark",
+                            "benchmark_role": "microbenchmark",
+                            "objective": "Measure sustained bandwidth.",
+                            "hypothesis": "Sequential loads expose the bandwidth ceiling.",
+                            "rationale": "This is the first roofline anchor.",
+                            "target_node_ids": ["dram_bandwidth"],
+                            "required_evidence": ["successful run"],
+                            "success_unlocks": "A first bandwidth bound.",
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    kb_path = tmp_path / "performance_model.json"
+    kb_path.write_text(json.dumps({"proposal_history": []}), encoding="utf-8")
+    orchestrator = Orchestrator(agents=[], emit_live_trace=False, emit_live_conversation=False)
+
+    orchestrator._append_planner_outputs(
+        kb_path=kb_path,
+        iteration=0,
+        plan={
+            "planner": "noncanonical-planner",
+            "reason": "Wrong in-memory proposal should be ignored.",
+            "proposal": {"proposal_summary": "wrong summary", "target_nodes": [], "proposals": []},
+            "proposal_md_artifact": str(proposal_md),
+            "proposal_artifact": "proposal.json",
+        },
+    )
+
+    kb = json.loads(kb_path.read_text(encoding="utf-8"))
+
+    assert kb["current_proposal"]["proposal_summary"] == "Canonical proposal summary from markdown."
+    assert kb["proposal_history"][-1]["proposal"]["proposals"][0]["title"] == "Canonical bandwidth benchmark"
+
+
+def test_orchestrator_prefers_research_markdown_for_history(tmp_path):
+    research_md = tmp_path / "research.md"
+    research_md.write_text(
+        _render_research_md(
+            {
+                "iteration": 0,
+                "planner": "markdown-researcher",
+                "reason": "Use markdown research notes as canonical.",
+                "request_summary": "Canonical request summary from markdown.",
+                "proposed_dimensions": ["dram_bandwidth"],
+                "unanswered_questions": ["Which counters best separate caches?"],
+                "findings": [
+                    {
+                        "title": "Canonical finding",
+                        "relevance": "high",
+                        "source_url": "https://example.com/finding",
+                        "summary": "A useful benchmark pattern was identified.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    kb_path = tmp_path / "performance_model.json"
+    kb_path.write_text(json.dumps({"research_history": [], "target_dimensions": []}), encoding="utf-8")
+    orchestrator = Orchestrator(agents=[], emit_live_trace=False, emit_live_conversation=False)
+
+    orchestrator._append_research_history(
+        kb_path=kb_path,
+        iteration=0,
+        research=orchestrator._canonicalize_markdown_result(
+            "llm_research",
+            {
+                "planner": "noncanonical-researcher",
+                "reason": "Wrong in-memory research should be ignored.",
+                "request_summary": "wrong summary",
+                "findings": [],
+                "proposed_dimensions": [],
+                "unanswered_questions": [],
+                "artifact_md": str(research_md),
+            },
+        ),
+    )
+
+    kb = json.loads(kb_path.read_text(encoding="utf-8"))
+
+    assert kb["research_history"][-1]["request_summary"] == "Canonical request summary from markdown."
+    assert kb["research_history"][-1]["findings"][0]["title"] == "Canonical finding"
+    assert kb["latest_research"]["proposed_dimensions"] == ["dram_bandwidth"]
 
 
 def test_resilient_workflow_falls_back_when_openai_plan_times_out():

@@ -9,6 +9,12 @@ from typing import Any
 
 from .agents import Agent, default_agents
 from .llm import HeuristicWorkflowBackend, OpenAIWorkflowBackend, ResilientWorkflowBackend
+from .markdown_artifacts import (
+    parse_analysis_markdown,
+    parse_proposal_markdown,
+    parse_research_markdown,
+    parse_research_request_markdown,
+)
 from .models import AgentContext, RetryPolicy, Task
 from .store import write_json
 
@@ -156,7 +162,8 @@ class Orchestrator:
                     break
                 self._increment_run_counter(kb_path, "planner_calls")
 
-                research_plan = research_plan_task.result or {}
+                research_plan = self._canonicalize_markdown_result("llm_plan_research", research_plan_task.result or {})
+                research_plan_task.result = research_plan
                 self._append_planner_research_outputs(kb_path=kb_path, iteration=iteration, result=research_plan)
                 knowledge_base = self._load_kb(kb_path)
                 research_request_artifact = research_plan.get("research_request_artifact")
@@ -179,7 +186,8 @@ class Orchestrator:
                         self._update_run_state(kb_path, status="stopped", reason="search_failed", iteration=iteration)
                         break
                     self._increment_run_counter(kb_path, "search_calls")
-                    research = research_task.result or {}
+                    research = self._canonicalize_markdown_result("llm_research", research_task.result or {})
+                    research_task.result = research
                     self._append_research_history(kb_path=kb_path, iteration=iteration, research=research)
                     knowledge_base = self._load_kb(kb_path)
 
@@ -206,7 +214,8 @@ class Orchestrator:
                     self._update_run_state(kb_path, status="stopped", reason="planner_proposal_failed", iteration=iteration)
                     break
                 self._increment_run_counter(kb_path, "planner_calls")
-                plan = proposal_task.result or {}
+                plan = self._canonicalize_markdown_result("llm_plan_proposal", proposal_task.result or {})
+                proposal_task.result = plan
                 self._append_planner_outputs(kb_path=kb_path, iteration=iteration, plan=plan)
                 knowledge_base = self._load_kb(kb_path)
 
@@ -295,7 +304,8 @@ class Orchestrator:
                 self._increment_run_counter(kb_path, "analyzer_calls")
                 self._update_run_state(kb_path, status="running", reason="iteration_completed", iteration=iteration + 1)
 
-                analysis_result = analysis_task.result or {}
+                analysis_result = self._canonicalize_markdown_result("llm_analyze_update", analysis_task.result or {})
+                analysis_task.result = analysis_result
                 veto_next_plan = bool(analysis_result.get("veto_next_plan", False))
                 if float(analysis_result.get("coverage_score", 0.0)) >= target_coverage and not veto_next_plan:
                     self._update_run_state(kb_path, status="stopped", reason="target_coverage_reached", iteration=iteration + 1)
@@ -368,17 +378,22 @@ class Orchestrator:
         write_json(kb_path, kb)
 
     def _append_research_history(self, kb_path: Path, iteration: int, research: dict[str, Any]) -> None:
+        research = self._canonicalize_markdown_result("llm_research", research)
         kb = self._load_kb(kb_path)
         kb.setdefault("research_history", [])
         findings = research.get("findings", [])
+        request_summary = str(research.get("request_summary", "")).strip()
+        unanswered_questions = research.get("unanswered_questions", [])
         kb["research_history"].append(
             {
                 "iteration": iteration,
                 "planner": research.get("planner"),
                 "reason": research.get("reason"),
+                "request_summary": request_summary,
                 "findings_count": len(findings) if isinstance(findings, list) else 0,
                 "findings": findings if isinstance(findings, list) else [],
                 "proposed_dimensions": research.get("proposed_dimensions", []),
+                "unanswered_questions": unanswered_questions if isinstance(unanswered_questions, list) else [],
                 "artifact": research.get("artifact"),
                 "artifact_md": research.get("artifact_md"),
                 "timestamp": time.time(),
@@ -398,13 +413,17 @@ class Orchestrator:
             "iteration": iteration,
             "artifact": research.get("artifact"),
             "artifact_md": research.get("artifact_md"),
+            "request_summary": request_summary,
             "findings_count": len(findings) if isinstance(findings, list) else 0,
+            "proposed_dimensions": research.get("proposed_dimensions", []),
         }
         write_json(kb_path, kb)
 
     def _append_planner_research_outputs(self, kb_path: Path, iteration: int, result: dict[str, Any]) -> None:
+        result = self._canonicalize_markdown_result("llm_plan_research", result)
         kb = self._load_kb(kb_path)
         kb.setdefault("proposal_history", [])
+        research_request = result.get("research_request", {}) if isinstance(result.get("research_request", {}), dict) else {}
         kb["proposal_history"].append(
             {
                 "iteration": iteration,
@@ -412,6 +431,7 @@ class Orchestrator:
                 "reason": result.get("reason"),
                 "research_request_artifact": result.get("research_request_artifact"),
                 "research_request_meta_artifact": result.get("research_request_meta_artifact"),
+                "research_request": research_request,
                 "proposal": None,
                 "timestamp": time.time(),
             }
@@ -419,6 +439,7 @@ class Orchestrator:
         write_json(kb_path, kb)
 
     def _append_planner_outputs(self, kb_path: Path, iteration: int, plan: dict[str, Any]) -> None:
+        plan = self._canonicalize_markdown_result("llm_plan_proposal", plan)
         kb = self._load_kb(kb_path)
         kb.setdefault("proposal_history", [])
         proposal = plan.get("proposal", {})
@@ -435,6 +456,42 @@ class Orchestrator:
             }
         )
         write_json(kb_path, kb)
+
+    def _canonicalize_markdown_result(self, task_kind: str, result: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            return {}
+        normalized = dict(result)
+        if task_kind == "llm_plan_research":
+            parsed = parse_research_request_markdown(self._read_artifact_text(result.get("research_request_artifact")))
+            if any(parsed.values()):
+                normalized["research_request"] = parsed
+            return normalized
+        if task_kind == "llm_research":
+            parsed = parse_research_markdown(self._read_artifact_text(result.get("artifact_md")))
+            if parsed.get("request_summary", "").strip():
+                normalized["request_summary"] = parsed["request_summary"]
+            normalized["proposed_dimensions"] = parsed.get("proposed_dimensions", [])
+            normalized["unanswered_questions"] = parsed.get("unanswered_questions", [])
+            normalized["findings"] = parsed.get("findings", [])
+            return normalized
+        if task_kind == "llm_plan_proposal":
+            parsed = parse_proposal_markdown(self._read_artifact_text(result.get("proposal_md_artifact")))
+            if parsed.get("proposal_summary", "").strip() or parsed.get("proposals"):
+                normalized["proposal"] = parsed
+            return normalized
+        if task_kind == "llm_analyze_update":
+            parsed = parse_analysis_markdown(self._read_artifact_text(result.get("artifact_md")))
+            if parsed.get("summary", "").strip():
+                normalized["summary"] = parsed["summary"]
+            if parsed.get("reason", "").strip():
+                normalized["reason"] = parsed["reason"]
+            normalized["covered_dimensions"] = parsed.get("covered_dimensions", [])
+            normalized["required_observability"] = parsed.get("required_observability", [])
+            normalized["claims"] = parsed.get("claims", [])
+            normalized["claims_added"] = len(parsed.get("claims", []))
+            normalized["stop"] = bool(parsed.get("stop", normalized.get("stop", False)))
+            return normalized
+        return normalized
 
     def _increment_run_counter(self, kb_path: Path, counter_name: str) -> None:
         kb = self._load_kb(kb_path)
