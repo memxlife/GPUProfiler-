@@ -49,6 +49,7 @@ Autonomous artifacts include:
 - `knowledge_base/` (markdown textbook-style knowledge base, frontier, and local findings)
 - `autonomous_report.md`
 - `iterations/iter_XX/knowledge_model.json` (planner-owned knowledge hierarchy)
+- `iterations/iter_XX/question.md` (planner-selected next frontier question)
 - `iterations/iter_XX/proposal.json` and `proposal.md` (planner-owned non-executable proposal)
 - `iterations/iter_XX/research_request.json` plus `research.json` and `research.md` (planner-directed search handoff and results)
 - `iterations/iter_XX/implementation.json` and `implementation.md` (LLM code generator output)

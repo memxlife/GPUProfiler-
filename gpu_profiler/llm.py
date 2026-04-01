@@ -38,6 +38,7 @@ CODEGEN_SYSTEM_PROMPT = (
 class ResearchRequestPlanDecision:
     reason: str
     research_request: dict[str, Any] | None
+    current_question: str
     planner: str
     raw_response: str = ""
 
@@ -47,6 +48,7 @@ class ProposalPlanDecision:
     reason: str
     proposal: dict[str, Any]
     planner: str
+    current_question: str = ""
     raw_response: str = ""
 
 
@@ -56,6 +58,7 @@ class PlanDecision:
     knowledge_model: dict[str, Any]
     proposal: dict[str, Any]
     research_request: dict[str, Any] | None
+    current_question: str
     planner: str
 
 
@@ -149,6 +152,7 @@ class LLMWorkflowBackend:
         iteration: int,
         max_iterations: int,
         max_benchmarks: int,
+        question_memo: str = "",
         research_memo: str = "",
     ) -> ProposalPlanDecision:
         raise NotImplementedError
@@ -289,6 +293,7 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
             knowledge_model=_current_or_default_knowledge_model(kb=kb, intent=intent),
             proposal=proposal.proposal,
             research_request=research.research_request,
+            current_question=research.current_question,
             planner=self.name,
         )
 
@@ -306,11 +311,13 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
             return ResearchRequestPlanDecision(
                 reason="No external research needed for the current planner state.",
                 research_request=None,
+                current_question=_next_frontier_question(kb=kb, focus_dimensions=focus or ["gpu_performance"]),
                 planner=self.name,
             )
         return ResearchRequestPlanDecision(
             reason="Fallback planner produced a generic research request.",
             research_request=_default_research_request(intent=intent, focus_dimensions=focus),
+            current_question=_next_frontier_question(kb=kb, focus_dimensions=focus),
             planner=self.name,
             raw_response="",
         )
@@ -322,6 +329,7 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
         iteration: int,
         max_iterations: int,
         max_benchmarks: int,
+        question_memo: str = "",
         research_memo: str = "",
     ) -> ProposalPlanDecision:
         _ = (max_iterations, research_memo)
@@ -329,6 +337,7 @@ class HeuristicWorkflowBackend(LLMWorkflowBackend):
         return ProposalPlanDecision(
             reason="Fallback planner produced generic plan items.",
             proposal=_default_proposal(intent=intent, focus_dimensions=focus, iteration=iteration),
+            current_question=_question_text_from_memo(question_memo) or _next_frontier_question(kb=kb, focus_dimensions=focus),
             planner=self.name,
             raw_response="",
         )
@@ -601,6 +610,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             knowledge_model=_current_or_default_knowledge_model(kb=kb, intent=intent),
             proposal=proposal.proposal,
             research_request=research.research_request,
+            current_question=research.current_question,
             planner=self.name,
         )
 
@@ -626,6 +636,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             "max_benchmarks": max_benchmarks,
             "output_schema": {
                 "reason": "str",
+                "current_question": "str",
                 "research_request": {
                     "intent_summary": "str",
                     "request_summary": "str",
@@ -662,6 +673,11 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         return ResearchRequestPlanDecision(
             reason=str(out.get("reason", "")).strip(),
             research_request=research_request,
+            current_question=str(out.get("current_question", "")).strip()
+            or _next_frontier_question(
+                kb=kb,
+                focus_dimensions=_planner_focus_dimensions_from_kb(kb=kb, iteration=iteration, max_benchmarks=max_benchmarks),
+            ),
             planner=self.name,
             raw_response=json.dumps(out, indent=2),
         )
@@ -673,6 +689,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         iteration: int,
         max_iterations: int,
         max_benchmarks: int,
+        question_memo: str = "",
         research_memo: str = "",
     ) -> ProposalPlanDecision:
         compact_kb = _compact_planner_kb(
@@ -687,6 +704,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
             "iteration": iteration,
             "max_iterations": max_iterations,
             "max_benchmarks": max_benchmarks,
+            "question_memo": _trim_text(question_memo, 1200),
             "research_memo": _trim_text(research_memo, 3000),
         }
         payload = _enforce_payload_budget(
@@ -718,6 +736,7 @@ class OpenAIWorkflowBackend(LLMWorkflowBackend):
         return ProposalPlanDecision(
             reason=_proposal_reason_from_memo(memo),
             proposal=proposal,
+            current_question=_question_text_from_memo(question_memo) or _next_frontier_question(kb=kb, focus_dimensions=focus),
             planner=self.name,
             raw_response=memo,
         )
@@ -1122,12 +1141,13 @@ class ResilientWorkflowBackend(LLMWorkflowBackend):
         iteration: int,
         max_iterations: int,
         max_benchmarks: int,
+        question_memo: str = "",
         research_memo: str = "",
     ) -> ProposalPlanDecision:
         try:
-            return self._call_primary("plan_proposal", intent, kb, iteration, max_iterations, max_benchmarks, research_memo)
+            return self._call_primary("plan_proposal", intent, kb, iteration, max_iterations, max_benchmarks, question_memo, research_memo)
         except Exception as exc:  # noqa: BLE001
-            alt = self.fallback.plan_proposal(intent, kb, iteration, max_iterations, max_benchmarks, research_memo)
+            alt = self.fallback.plan_proposal(intent, kb, iteration, max_iterations, max_benchmarks, question_memo, research_memo)
             alt.reason = f"Primary proposal planning failed ({exc}); fallback used. {alt.reason}"
             alt.planner = f"{getattr(self.primary, 'name', 'primary')}->fallback:{alt.planner}"
             return alt
@@ -1792,12 +1812,36 @@ def _compact_research_request(request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _next_frontier_question(kb: dict[str, Any], focus_dimensions: list[str]) -> str:
+    frontier = str(kb.get("knowledge_base_frontier_memo", "") or kb.get("knowledge_base_frontier_excerpt", "")).strip()
+    for raw_line in frontier.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if re.match(r"^\d+\.\s+", line):
+            return re.sub(r"^\d+\.\s+", "", line).strip()
+    for item in focus_dimensions:
+        text = str(item).strip()
+        if text:
+            return f"What is the next bottom-up question needed to characterize {text} on this GPU?"
+    return "What is the next bottom-up question needed to extend the current known frontier of this GPU knowledge base?"
+
+
+def _question_text_from_memo(question_memo: str) -> str:
+    for raw_line in str(question_memo or "").splitlines():
+        line = raw_line.strip()
+        if line and not line.startswith("#") and not line.lower().startswith("summary") and not line.lower().startswith("why this question matters") and not line.lower().startswith("frontier source"):
+            return line
+    return ""
+
+
 def _render_planner_proposal_prompt(payload: dict[str, Any]) -> str:
     kb = payload.get("knowledge_base", {}) if isinstance(payload.get("knowledge_base", {}), dict) else {}
     model = kb.get("current_knowledge_model", {}) if isinstance(kb.get("current_knowledge_model", {}), dict) else {}
     tools = ", ".join(sorted(str(k) for k, v in (kb.get("available_tools", {}) or {}).items() if v)) or "none"
     focus_nodes = ", ".join(str(x) for x in model.get("focus_nodes", []) if str(x).strip()) or "none yet"
     covered = ", ".join(str(x) for x in kb.get("covered_dimensions", []) if str(x).strip()) or "none yet"
+    question_memo = str(payload.get("question_memo", "")).strip() or "No explicit planner question recorded."
     research_memo = str(payload.get("research_memo", "")).strip() or "No external findings yet."
     frontier_memo = str(kb.get("knowledge_base_frontier_excerpt", "")).strip() or "No frontier memo recorded."
     knowledge_book_excerpt = str(kb.get("knowledge_base_book_excerpt", "")).strip() or "No knowledge-base excerpt recorded."
@@ -1809,8 +1853,9 @@ def _render_planner_proposal_prompt(payload: dict[str, Any]) -> str:
         f"Covered dimensions so far: {covered}\n\n"
         f"Knowledge-base excerpt:\n{knowledge_book_excerpt}\n\n"
         f"Frontier memo:\n{frontier_memo}\n\n"
+        f"Selected question:\n{question_memo}\n\n"
         f"Research memo:\n{research_memo}\n\n"
-        "Task: Propose the single best next benchmark proposal memo.\n"
+        "Task: Propose the single best next benchmark proposal memo that directly answers the selected question.\n"
         "Requirements:\n"
         "- non-executable\n"
         "- one benchmark only\n"
